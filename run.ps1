@@ -44,9 +44,10 @@ if (-not (Invoke-WebVpnLogin -MaxAttempts $MaxLoginAttempts)) {
 Update-LiteLlmConfig
 
 # ⚠ LiteLLM 只在启动时读取一次 litellm_config.yaml（已实测：运行中修改文件里的
-#   Cookie，服务仍用旧值请求上游）。所以后台刷新 Cookie 后必须重启代理才生效。
-#   这里的做法：后台任务定期刷新 Cookie 并重新生成配置，如果代理进程已退出就重新拉起。
-#   若你不想自动重启，把这个 job 去掉、改为手动重跑 run.ps1 即可（见 README）。
+#   Cookie，服务仍用旧值请求上游）。所以后台刷新 Cookie 后【必须重启代理】才生效。
+#   本脚本的做法：后台任务只负责刷新 Cookie 并重新生成 litellm_config.yaml，
+#   【不会】自动重启代理。看到「Cookie refreshed」提示后，请 Ctrl+C 停掉本脚本再重跑。
+#   若你不需要后台刷新，把这个 job 去掉、改为手动重跑 run.ps1 即可（见 README）。
 $refreshJob = Start-Job -Name "UJN-Cookie-Refresh" -ScriptBlock {
     param($ProjectDir, $RefreshSeconds, $MaxLoginAttempts, $Port)
 

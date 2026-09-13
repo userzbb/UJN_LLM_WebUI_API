@@ -96,3 +96,87 @@ def test_load_models_reads_flat_name_list():
     assert names, "models.yaml should not be empty"
     assert all(isinstance(n, str) for n in names)
     assert "GLM-5.3" in names
+
+
+# --- read_yaml_scalar: 必须与真正的 YAML 解析一致 ---------------------------
+# 背景：这个正则解析器决定能否读出 config.yaml 里的 api_key / api_base。
+# README 的示例恰好用了「双引号 + 行尾注释」这一组合，是最容易被用户抄到的写法。
+
+def _yaml_get(text: str, key: str):
+    """用真正的 YAML 解析器取嵌套任意深度的键值，作为对照标准。"""
+    def dig(node):
+        if isinstance(node, dict):
+            if key in node:
+                return node[key]
+            for value in node.values():
+                found = dig(value)
+                if found is not None:
+                    return found
+        return None
+    return dig(yaml.safe_load(text))
+
+
+def test_read_yaml_scalar_handles_trailing_comment():
+    """行尾注释是合法 YAML，且 README 示例就是这么写的。
+
+    回归：旧正则 `([^"\n]+?)$` 要求值一直延伸到行尾，遇到注释返回 None，
+    于是 load_proxy_settings 在一个完全正确的配置上报「缺少 api_key」并退出。
+    """
+    from build_litellm_config import read_yaml_scalar
+
+    text = 'proxy:\n  api_key: "sk-real"   # 我的密钥\n'
+    assert read_yaml_scalar(text, "api_key") == "sk-real"
+    assert read_yaml_scalar(text, "api_key") == _yaml_get(text, "api_key")
+
+
+def test_read_yaml_scalar_strips_single_quotes():
+    """单引号是合法 YAML。旧正则只处理双引号，会把引号当值的一部分。
+
+    后果：密钥变成 `'sk-real'`（含引号）发给上游 -> 401。
+    """
+    from build_litellm_config import read_yaml_scalar
+
+    text = "proxy:\n  api_key: 'sk-real'\n"
+    assert read_yaml_scalar(text, "api_key") == "sk-real"
+    assert read_yaml_scalar(text, "api_key") == _yaml_get(text, "api_key")
+
+
+def test_read_yaml_scalar_matches_real_yaml_parser():
+    """与本文件其余部分一样，用真正的 YAML 解析器当标准答案。"""
+    from build_litellm_config import read_yaml_scalar
+
+    variants = [
+        'proxy:\n  api_key: "sk-a"\n',
+        "proxy:\n  api_key: 'sk-a'\n",
+        "proxy:\n  api_key: sk-a\n",
+        'proxy:\n  api_key: "sk-a"  # comment\n',
+        "proxy:\n  api_key: 'sk-a'  # comment\n",
+        'proxy:\n  api_key: "sk-a b c"\n',
+        'proxy:\n  api_key: "sk-a#b"\n',
+        'a:\n  b:\n    api_key: "sk-deep"\n',
+    ]
+    for text in variants:
+        got = read_yaml_scalar(text, "api_key")
+        want = _yaml_get(text, "api_key")
+        assert got == want, f"{text!r}: got {got!r}, want {want!r}"
+
+
+def test_load_proxy_settings_accepts_readme_style_config(tmp_path):
+    """把 README 的写法填上真值后必须能正常读出——这正是用户会做的第一步。"""
+    from build_litellm_config import load_proxy_settings
+
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        'username: "u"          # 学号\n'
+        'password: "p"\n'
+        "proxy:\n"
+        '  api_key: "sk-real"    # ChatUJN 的 API Key\n'
+        '  webvpn_api_base: "https://webvpn.ujn.edu.cn/https/abc/api"   # 见 README\n'
+        '  webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"\n',
+        encoding="utf-8",
+    )
+
+    settings = load_proxy_settings(config)
+    assert settings["api_key"] == "sk-real"
+    assert settings["api_base"] == "https://webvpn.ujn.edu.cn/https/abc/api"
+    assert settings["host_query"] == "vpn-12-o2-chat.ujn.edu.cn"

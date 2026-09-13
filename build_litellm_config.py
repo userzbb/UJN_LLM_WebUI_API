@@ -9,7 +9,6 @@ LiteLLM 负责全部协议转换（OpenAI / Anthropic / Responses）与工具调
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import yaml
@@ -39,9 +38,30 @@ BROWSER_HEADERS = {
 
 
 def read_yaml_scalar(text: str, key: str) -> str | None:
-    """从 YAML 文本中取一个标量值（避免依赖完整解析的嵌套结构）。"""
-    match = re.search(rf'^\s*{key}\s*:\s*"?([^"\n]+?)"?\s*$', text, re.M)
-    return match.group(1).strip() if match else None
+    """从 YAML 文本里取一个标量值，嵌套任意深度都能找到。
+
+    用真正的 YAML 解析器而不是正则：正则在合法写法上会悄悄出错。
+    实测两类（README 的示例恰好踩中第一类）：
+      - 行尾注释 `api_key: "sk-x"  # 注释` -> 旧正则返回 None，报「缺少 api_key」
+      - 单引号   `api_key: 'sk-x'`        -> 旧正则连引号一起返回，密钥变成 "'sk-x'"
+    """
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"config.yaml 不是合法的 YAML: {exc}") from exc
+
+    def dig(node: object) -> object:
+        if isinstance(node, dict):
+            if key in node:
+                return node[key]
+            for value in node.values():
+                found = dig(value)
+                if found is not None:
+                    return found
+        return None
+
+    found = dig(data)
+    return None if found is None else str(found)
 
 
 def load_proxy_settings(config_file: Path = CONFIG_FILE) -> dict[str, str]:
