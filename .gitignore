@@ -19,3 +19,6 @@ proxy_stderr.log
 # 编辑器
 .vscode/
 .idea/
+
+# SDD scratch (ledger/briefs) — never commit
+.superpowers/
