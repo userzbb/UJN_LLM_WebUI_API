@@ -241,7 +241,14 @@ uv run python build_litellm_config.py --list-upstream
 (Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
 ```
 
-**用返回列表里的 id 作为模型名。** 把上游新出现的名字加进 `models.yaml` 后重新生成配置：
+**用返回列表里的 id 作为模型名。** 或者直接一键同步：
+
+```powershell
+uv run python build_litellm_config.py --sync-models
+```
+
+它按上游清单更新 `models.yaml`，并报告新增/下线的模型；**已是最新时不动文件**。
+同步完重新生成配置并重启：
 
 ```powershell
 uv run python build_litellm_config.py
@@ -484,8 +491,14 @@ uv run python build_litellm_config.py --list-upstream
 (Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
 ```
 
-**Use an `id` from the returned list as the model name.** Add any new upstream
-name to `models.yaml`, then regenerate and restart:
+**Use an `id` from the returned list as the model name.** Or sync in one step:
+
+```powershell
+uv run python build_litellm_config.py --sync-models
+```
+
+This updates `models.yaml` from the upstream list and reports what was added or retired;
+it leaves the file untouched when already in sync. Then regenerate and restart:
 
 ```powershell
 uv run python build_litellm_config.py

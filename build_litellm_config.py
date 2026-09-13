@@ -9,6 +9,7 @@ LiteLLM 负责全部协议转换（OpenAI / Anthropic / Responses）与工具调
 
 import argparse
 import json
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -113,6 +114,55 @@ def load_models(models_file: Path = MODELS_FILE) -> list[str]:
     return models
 
 
+def merge_model_ids(current: list[str], upstream: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """把上游清单并入当前清单，返回 (合并结果, 新增, 消失)。
+
+    models.yaml 的语义是「当前可调用的模型」：上游没有的必须删掉，
+    否则代理会对外暴露一个必然 `Model not found` 的名字。
+
+    保留存活模型的当前顺序、新模型追加在末尾（而不是直接用上游顺序）：
+    这样每次同步的 diff 最小，review 时一眼能看出到底变了哪几个。
+    """
+    added = [m for m in upstream if m not in current]
+    removed = [m for m in current if m not in upstream]
+    merged = [m for m in current if m in upstream] + added
+    return merged, added, removed
+
+
+def render_models_yaml(models: list[str], snapshot_date: str) -> str:
+    """生成 models.yaml 文本。
+
+    用 yaml.safe_dump 而不是手工拼 `- {name}`：模型名来自服务端，
+    可能含引号等字符，手工插值会产出非法 YAML（同 render_config 的处理）。
+    """
+    header = (
+        "# 上游模型 id 列表。直接以原名对外暴露，不做别名映射。\n"
+        "# 客户端（Claude Code / Codex / OpenCode）填的就是这里的名字。\n"
+        f"# 本文件由 `uv run python build_litellm_config.py --sync-models` 生成。\n"
+        f"# 快照时间: {snapshot_date} —— 上游会更新，此列表可能已过期。\n"
+    )
+    return header + yaml.safe_dump({"models": models}, allow_unicode=False, sort_keys=False)
+
+
+def sync_models_file(upstream: list[str], models_file: Path, snapshot_date: str) -> tuple[list[str], list[str], list[str]]:
+    """按上游清单更新 models.yaml。
+
+    内容没变化时不写文件：避免每次同步都刷新 mtime、产生无意义的 git diff。
+    返回 (合并结果, 新增, 消失)，供调用方打印。
+    """
+    current: list[str] = []
+    if models_file.exists():
+        data = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
+        current = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
+
+    merged, added, removed = merge_model_ids(current, upstream)
+    if not added and not removed:
+        return merged, added, removed
+
+    models_file.write_text(render_models_yaml(merged, snapshot_date), encoding="utf-8")
+    return merged, added, removed
+
+
 def build_target_url(api_base: str, host_query: str) -> str:
     """构造上游 URL。
 
@@ -180,8 +230,8 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[str
     return yaml.safe_dump(config, allow_unicode=False, sort_keys=False, default_flow_style=False)
 
 
-def list_upstream_models(settings: dict[str, str], cookie_header: str) -> None:
-    """打印上游当前可用的模型 id（排查「模型下线」用）。"""
+def fetch_upstream_models(settings: dict[str, str], cookie_header: str) -> list[dict]:
+    """拉取上游的模型条目（含 max_model_len），保持上游返回顺序。"""
     import httpx
 
     url = build_target_url(settings["api_base"], settings["host_query"])
@@ -192,7 +242,12 @@ def list_upstream_models(settings: dict[str, str], cookie_header: str) -> None:
     models_url = url.replace("/chat/completions", "/models")
     response = httpx.get(models_url, headers=headers, timeout=60, trust_env=False)
     response.raise_for_status()
-    for item in response.json().get("data", []):
+    return list(response.json().get("data", []))
+
+
+def list_upstream_models(settings: dict[str, str], cookie_header: str) -> None:
+    """打印上游当前可用的模型 id（排查「模型下线」用）。"""
+    for item in fetch_upstream_models(settings, cookie_header):
         print(f"  {item.get('id')}  (ctx={item.get('max_model_len')})")
 
 
@@ -201,8 +256,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="生成 LiteLLM 配置（注入 WebVPN Cookie）。")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--models-file", default=str(MODELS_FILE))
     parser.add_argument("--list-upstream", action="store_true",
                         help="列出上游当前可用模型，然后退出")
+    parser.add_argument("--sync-models", action="store_true",
+                        help="按上游清单更新 models.yaml（增/删都会报告），然后退出")
     args = parser.parse_args()
 
     settings = load_proxy_settings()
@@ -210,6 +268,27 @@ def main() -> None:
 
     if args.list_upstream:
         list_upstream_models(settings, cookie_header)
+        return
+
+    if args.sync_models:
+        items = fetch_upstream_models(settings, cookie_header)
+        upstream = [str(i.get("id")).strip() for i in items if str(i.get("id") or "").strip()]
+        if not upstream:
+            raise SystemExit("上游没有返回任何模型，未改动 models.yaml")
+
+        models_file = Path(args.models_file)
+        merged, added, removed = sync_models_file(upstream, models_file, date.today().isoformat())
+
+        for name in added:
+            print(f"  + {name}")
+        for name in removed:
+            print(f"  - {name}")
+        if not added and not removed:
+            print(f"{models_file.name} 已是最新（{len(merged)} 个模型），未改动")
+        else:
+            print(f"已更新 {models_file.name}: {len(merged)} 个模型")
+            print("下一步：重新生成配置并重启代理")
+            print("  uv run python build_litellm_config.py")
         return
 
     models = load_models()

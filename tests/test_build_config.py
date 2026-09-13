@@ -180,3 +180,100 @@ def test_load_proxy_settings_accepts_readme_style_config(tmp_path):
     assert settings["api_key"] == "sk-real"
     assert settings["api_base"] == "https://webvpn.ujn.edu.cn/https/abc/api"
     assert settings["host_query"] == "vpn-12-o2-chat.ujn.edu.cn"
+
+
+# --- --sync-models: 让 models.yaml 跟上游保持一致 ---------------------------
+
+def test_merge_model_ids_reports_additions_and_removals():
+    from build_litellm_config import merge_model_ids
+
+    merged, added, removed = merge_model_ids(
+        current=["keep", "gone", "also-keep"],
+        upstream=["keep", "also-keep", "brand-new"],
+    )
+
+    # 保留现有顺序，新模型追加在后面 —— 这样每次同步的 diff 最小
+    assert merged == ["keep", "also-keep", "brand-new"]
+    assert added == ["brand-new"]
+    assert removed == ["gone"]
+
+
+def test_merge_model_ids_is_a_no_op_when_already_in_sync():
+    from build_litellm_config import merge_model_ids
+
+    same = ["a", "b", "c"]
+    merged, added, removed = merge_model_ids(same, list(same))
+
+    assert (merged, added, removed) == (same, [], [])
+
+
+def test_merge_model_ids_handles_empty_current():
+    """models.yaml 被清空或在全新环境首次同步。"""
+    from build_litellm_config import merge_model_ids
+
+    merged, added, removed = merge_model_ids([], ["x", "y"])
+
+    assert merged == ["x", "y"]
+    assert added == ["x", "y"]
+    assert removed == []
+
+
+def test_render_models_yaml_round_trips_through_load_models(tmp_path):
+    """生成的 models.yaml 必须能被 load_models 原样读回。"""
+    from build_litellm_config import render_models_yaml
+
+    path = tmp_path / "models.yaml"
+    path.write_text(render_models_yaml(["GLM-5.3", "/models/Qwen3.8-Flash-Next", "1.Qwen3.5-27B"],
+                                       "2026-09-14"), encoding="utf-8")
+
+    assert load_models(path) == ["GLM-5.3", "/models/Qwen3.8-Flash-Next", "1.Qwen3.5-27B"]
+
+
+def test_render_models_yaml_survives_hostile_model_name(tmp_path):
+    """模型名来自服务端，可能含引号等字符。
+
+    手工拼 `- {name}` 会产出非法 YAML；走 yaml.safe_dump 必须能安全转义。
+    （同 render_config 里 Cookie 的处理思路。）
+    """
+    from build_litellm_config import render_models_yaml
+
+    nasty = 'weird"name: [x]'
+    path = tmp_path / "models.yaml"
+    path.write_text(render_models_yaml(["ok", nasty], "2026-09-14"), encoding="utf-8")
+
+    assert load_models(path) == ["ok", nasty]
+
+
+def test_render_models_yaml_records_the_snapshot_date(tmp_path):
+    """上游会变，文件里必须留下「这是哪天的快照」。"""
+    from build_litellm_config import render_models_yaml
+
+    text = render_models_yaml(["GLM-5.3"], "2026-09-14")
+
+    assert "2026-09-14" in text
+
+
+def test_sync_models_does_not_write_when_nothing_changed(tmp_path):
+    """已同步时不应改动文件 —— 避免每次同步都产生无意义的 mtime/diff 抖动。"""
+    from build_litellm_config import sync_models_file
+
+    path = tmp_path / "models.yaml"
+    original = 'models:\n  - a\n  - b\n'
+    path.write_text(original, encoding="utf-8")
+
+    merged, added, removed = sync_models_file(["a", "b"], path, "2026-09-14")
+
+    assert (added, removed) == ([], [])
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_sync_models_writes_new_file_when_changed(tmp_path):
+    from build_litellm_config import sync_models_file
+
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - old\n", encoding="utf-8")
+
+    merged, added, removed = sync_models_file(["old", "new"], path, "2026-09-14")
+
+    assert added == ["new"] and removed == []
+    assert load_models(path) == ["old", "new"]
