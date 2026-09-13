@@ -277,3 +277,55 @@ def test_sync_models_writes_new_file_when_changed(tmp_path):
 
     assert added == ["new"] and removed == []
     assert load_models(path) == ["old", "new"]
+
+
+# --- WebVPN 路径段：可从主机名推导，不是密钥 --------------------------------
+
+def test_webvpn_path_segment_matches_the_live_config():
+    """金标准：这个值来自真实 config.yaml，独立核对过。
+
+    路径段 = "wrdvpnisthebest!" + AES-CTR(host)，密钥/IV 都是那个公开常量。
+    它只取决于主机名，不含任何账号/Cookie 信息，因此不是凭据。
+    """
+    from build_litellm_config import webvpn_path_segment
+
+    assert webvpn_path_segment("chat.ujn.edu.cn") == (
+        "77726476706e69737468656265737421f3ff40886925625e300d8db9d6562d"
+    )
+
+
+def test_webvpn_path_segment_is_deterministic():
+    """同一主机名永远得到同一结果 —— 没有任何随机/会话成分。"""
+    from build_litellm_config import webvpn_path_segment
+
+    assert webvpn_path_segment("chat.ujn.edu.cn") == webvpn_path_segment("chat.ujn.edu.cn")
+
+
+def test_webvpn_path_segment_differs_per_host():
+    from build_litellm_config import webvpn_path_segment
+
+    assert webvpn_path_segment("chat.ujn.edu.cn") != webvpn_path_segment("other.ujn.edu.cn")
+
+
+def test_webvpn_path_segment_starts_with_the_public_constant():
+    """前 16 字节是 ASCII 常量 —— 这正说明它不是随机密钥。"""
+    from build_litellm_config import webvpn_path_segment
+
+    segment = webvpn_path_segment("chat.ujn.edu.cn")
+
+    assert bytes.fromhex(segment)[:16] == b"wrdvpnisthebest!"
+    assert segment.isalnum() and segment == segment.lower()
+
+
+def test_extract_host_from_query_strips_vpn_prefix():
+    """host_query 形如 vpn-12-o2-chat.ujn.edu.cn，真实主机名在后面。"""
+    from build_litellm_config import extract_host_from_query
+
+    assert extract_host_from_query("vpn-12-o2-chat.ujn.edu.cn") == "chat.ujn.edu.cn"
+
+
+def test_extract_host_from_query_passes_through_plain_host():
+    """已经是裸主机名时原样返回，别把开头的字母吃掉。"""
+    from build_litellm_config import extract_host_from_query
+
+    assert extract_host_from_query("chat.ujn.edu.cn") == "chat.ujn.edu.cn"

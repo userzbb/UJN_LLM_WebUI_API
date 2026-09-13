@@ -77,7 +77,32 @@ proxy:
 - `webvpn_api_base` 到 `/api` 结束，不含 `/chat/completions`。
 - `webvpn_host_query` 是 URL 问号后面的部分，不含 `?`。
 
-### 从浏览器获取 WebVPN 地址
+### `<opaque>` 那一段不用手抄 —— 会自动填
+
+那个路径段**不是密钥**，而是**主机名的编码**：
+
+```
+路径段 = "wrdvpnisthebest!" + AES-CTR(主机名)
+```
+
+`wrdvpnisthebest!` 是所有 WebVPN 通用的公开常量，所以**同一个主机名永远得到同一个值**，
+全校所有人一样，不含任何账号/Cookie 信息。只拿到它而没有有效会话，照样被弹回登录页。
+
+因此 `webvpn_api_base` 直接留着 `<opaque>` 即可，脚本会用 `webvpn_host_query`
+里的主机名把它算出来：
+
+```yaml
+  webvpn_api_base: "https://webvpn.ujn.edu.cn/https/<opaque>/api"
+  webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"
+```
+
+想单独看看算出来是什么：
+
+```powershell
+uv run python build_litellm_config.py --webvpn-path chat.ujn.edu.cn
+```
+
+### 从浏览器获取 WebVPN 地址（可选，想核对时再看）
 
 1. 打开 <https://webvpn.ujn.edu.cn> 并登录。
 2. 通过 WebVPN 打开 ChatUJN 页面。
@@ -355,8 +380,17 @@ uv run playwright install chromium
 Copy-Item config.yaml.example config.yaml
 ```
 
-Edit `config.yaml` with your WebVPN credentials, ChatUJN API key, and the WebVPN URL
-(found in the browser's Network tab — see the Chinese section above for the walkthrough).
+Edit `config.yaml` with your WebVPN credentials, ChatUJN API key, and the WebVPN host query.
+
+**The `<opaque>` path segment needs no copying** — it is an *encoding of the hostname*,
+not a secret: `"wrdvpnisthebest!"` (a public constant shared by all WebVPN deployments)
+followed by AES-CTR of the host. The same hostname always yields the same value for every
+user, and holding it without a valid session only gets you redirected to the login page.
+Leave `<opaque>` in place and the script derives it from `webvpn_host_query`:
+
+```powershell
+uv run python build_litellm_config.py --webvpn-path chat.ujn.edu.cn
+```
 
 `config.yaml` is git-ignored. Never commit or share it.
 

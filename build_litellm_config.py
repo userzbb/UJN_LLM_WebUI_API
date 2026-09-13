@@ -9,6 +9,7 @@ LiteLLM 负责全部协议转换（OpenAI / Anthropic / Responses）与工具调
 
 import argparse
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -36,6 +37,29 @@ BROWSER_HEADERS = {
     "Referer": WEBVPN_ORIGIN + "/",
     "User-Agent": USER_AGENT,
 }
+
+# WebVPN 路径段的编码常量 —— 公开值，所有 wrdvpn 部署通用。
+# 路径段 = "wrdvpnisthebest!" + AES-CTR(主机名, key=iv=该常量)。
+# 即：它【只是主机名的编码】，不是凭据 —— 同一所学校所有用户的值都一样，
+# 且单独拿到它而没有有效会话 Cookie 时，只会被弹回登录页。
+WRD_CONSTANT = b"wrdvpnisthebest!"
+
+# host_query 形如 vpn-12-o2-chat.ujn.edu.cn，真实主机名在 vpn-<端口>-o<1|2>- 之后。
+_VPN_PREFIX_RE = re.compile(r"^vpn-\d+-o[12]-")
+
+
+def webvpn_path_segment(host: str) -> str:
+    """由主机名推导 WebVPN 的 /https/<段>/ 路径段（纯函数，不联网）。"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    encryptor = Cipher(algorithms.AES(WRD_CONSTANT), modes.CTR(WRD_CONSTANT)).encryptor()
+    ciphertext = encryptor.update(host.encode("utf-8")) + encryptor.finalize()
+    return (WRD_CONSTANT + ciphertext).hex()
+
+
+def extract_host_from_query(host_query: str) -> str:
+    """从 host_query 里取出真实主机名（去掉 vpn-<端口>-o<1|2>- 前缀）。"""
+    return _VPN_PREFIX_RE.sub("", host_query.strip(), count=1)
 
 
 def read_yaml_scalar(text: str, key: str) -> str | None:
@@ -78,6 +102,17 @@ def load_proxy_settings(config_file: Path = CONFIG_FILE) -> dict[str, str]:
         raise SystemExit("config.yaml 缺少 proxy.webvpn_api_base")
     if not api_key:
         raise SystemExit("config.yaml 缺少 proxy.api_key")
+
+    # 允许 webvpn_api_base 里留 <opaque> 占位符：路径段是可推导的，
+    # 直接用 host_query 里的主机名算出来，省得用户去浏览器 F12 里抄。
+    if "<opaque>" in api_base:
+        if not host_query:
+            raise SystemExit(
+                "webvpn_api_base 里是 <opaque>，但没有 webvpn_host_query 可供推导。\n"
+                "请填上 webvpn_host_query（形如 vpn-12-o2-chat.ujn.edu.cn）。"
+            )
+        host = extract_host_from_query(host_query)
+        api_base = api_base.replace("<opaque>", webvpn_path_segment(host))
 
     return {
         "api_base": api_base.rstrip("/"),
@@ -261,7 +296,20 @@ def main() -> None:
                         help="列出上游当前可用模型，然后退出")
     parser.add_argument("--sync-models", action="store_true",
                         help="按上游清单更新 models.yaml（增/删都会报告），然后退出")
+    parser.add_argument("--webvpn-path", metavar="HOST",
+                        help="由主机名推导 WebVPN 路径段（形如 chat.ujn.edu.cn），然后退出。"
+                             "不需要 config.yaml")
     args = parser.parse_args()
+
+    # 放在读 config.yaml 之前：这个查询是纯计算的，不该要求先配好凭据。
+    if args.webvpn_path:
+        host = extract_host_from_query(args.webvpn_path)
+        print(f"host : {host}")
+        print(f"path : https://webvpn.ujn.edu.cn/https/{webvpn_path_segment(host)}/api")
+        print()
+        print("提示：config.yaml 里可把 webvpn_api_base 写成带 <opaque> 的形式，")
+        print("      脚本会根据 webvpn_host_query 自动填上这一段。")
+        return
 
     settings = load_proxy_settings()
     cookie_header = load_cookie_header()

@@ -2,6 +2,8 @@ username: "your_student_or_staff_id"
 password: "your_webvpn_password"
 proxy:
   api_key: "sk-your-ujn-api-key"
-  # <opaque> 是 WebVPN 给你的随机路径段，从浏览器 Network 里复制（见 README 说明）
+  # 这一段不用手填：它是主机名的编码（公开常量 wrdvpnisthebest! + AES-CTR），
+  # 不是密钥。脚本会用下面的 webvpn_host_query 自动算出来。
+  # 想单独查看：uv run python build_litellm_config.py --webvpn-path chat.ujn.edu.cn
   webvpn_api_base: "https://webvpn.ujn.edu.cn/https/<opaque>/api"
   webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"
