@@ -150,8 +150,9 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[str
             "merge_reasoning_content_in_choices": True,
         },
         "general_settings": {
-            # Local-only proxy. The real UJN API key is injected above.
-            "disable_auth": True,
+            # 本机代理：不做鉴权。关掉鉴权的关键是 master_key 为 null
+            # （LiteLLM 没有 "disable_auth" 这个字段——写上去是静默无效的）。
+            # 真正的 UJN API Key 在上面按部署注入，客户端填 dummy 即可。
             "master_key": None,
         },
     }
