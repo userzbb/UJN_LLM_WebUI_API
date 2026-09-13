@@ -49,7 +49,9 @@ Update-LiteLlmConfig
 #   【不会】自动重启代理。看到「Cookie refreshed」提示后，请 Ctrl+C 停掉本脚本再重跑。
 #   若你不需要后台刷新，把这个 job 去掉、改为手动重跑 run.ps1 即可（见 README）。
 $refreshJob = Start-Job -Name "UJN-Cookie-Refresh" -ScriptBlock {
-    param($ProjectDir, $RefreshSeconds, $MaxLoginAttempts, $Port)
+    # 注意：这里不需要 $Port —— 本 job 不重启代理（见上方说明）。
+    # 若将来要实现自动重启，再把端口传进来。
+    param($ProjectDir, $RefreshSeconds, $MaxLoginAttempts)
 
     Set-Location $ProjectDir
     $env:NO_PROXY = "localhost,127.0.0.1"
@@ -69,7 +71,7 @@ $refreshJob = Start-Job -Name "UJN-Cookie-Refresh" -ScriptBlock {
             if ($attempt -lt $MaxLoginAttempts) { Start-Sleep -Seconds 5 }
         }
     }
-} -ArgumentList $ProjectDir, $RefreshSeconds, $MaxLoginAttempts, $Port
+} -ArgumentList $ProjectDir, $RefreshSeconds, $MaxLoginAttempts
 
 Write-Host "Started refresh job: $($refreshJob.Id)"
 Write-Host "Starting LiteLLM proxy on http://127.0.0.1:$Port"
