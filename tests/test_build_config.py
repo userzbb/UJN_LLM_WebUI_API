@@ -329,3 +329,156 @@ def test_extract_host_from_query_passes_through_plain_host():
     from build_litellm_config import extract_host_from_query
 
     assert extract_host_from_query("chat.ujn.edu.cn") == "chat.ujn.edu.cn"
+
+
+# --- reasoning_effort 必须被丢弃（双客户端兼容）----------------------------
+
+def test_render_config_drops_reasoning_effort_on_every_deployment():
+    config = yaml.safe_load(render_config(SETTINGS, "a=b", ["GLM-5.3", "deepseek-v41-flash"]))
+    assert config["model_list"], "model_list 不应为空"
+    for entry in config["model_list"]:
+        assert entry["litellm_params"]["additional_drop_params"] == ["reasoning_effort"], (
+            f"{entry['model_name']} 缺少 additional_drop_params"
+        )
+
+
+def test_render_config_drop_params_is_a_list_not_a_string():
+    config = yaml.safe_load(render_config(SETTINGS, "a=b", ["GLM-5.3"]))
+    drop = config["model_list"][0]["litellm_params"]["additional_drop_params"]
+    assert isinstance(drop, list)
+    assert all(isinstance(x, str) for x in drop)
+
+
+def test_render_config_drop_params_stays_per_deployment():
+    config = yaml.safe_load(render_config(SETTINGS, "a=b", ["GLM-5.3"]))
+    assert "additional_drop_params" not in config["litellm_settings"]
+    assert config["model_list"][0]["litellm_params"]["additional_drop_params"] == ["reasoning_effort"]
+
+
+def test_render_config_still_pure_ascii_with_drop_params():
+    out = render_config(SETTINGS, "a=b", ["GLM-5.3", "/models/Qwen3.8-Flash-Next"])
+    non_ascii = [c for c in out if ord(c) > 127]
+    assert not non_ascii, f"config must be ASCII-only, found {non_ascii[:5]}"
+
+
+# --- 客户端范本生成（clients/*，从 models.yaml 派生，避免漂移）---------------
+
+def test_pick_tier_models_prefers_the_fast_1m_models():
+    """四档默认用实测最快且 1M 上下文的两个模型。"""
+    from build_litellm_config import pick_tier_models
+
+    tiers = pick_tier_models(["GLM-5.3", "deepseek-v41-flash", "GLM-5.3-Flash"])
+
+    assert tiers["fable"] == "deepseek-v41-flash"
+    assert tiers["opus"] == "deepseek-v41-flash"
+    assert tiers["sonnet"] == "GLM-5.3-Flash"
+    assert tiers["haiku"] == "GLM-5.3-Flash"
+
+
+def test_pick_tier_models_falls_back_when_preferred_absent():
+    """上游改名/下线时不能崩 —— 退回到 models.yaml 里有的。"""
+    from build_litellm_config import pick_tier_models
+
+    tiers = pick_tier_models(["some-unknown-model"])
+
+    assert tiers["fable"] == "some-unknown-model"
+    assert tiers["haiku"] == "some-unknown-model"
+
+
+def test_pick_tier_models_handles_single_model():
+    """只有一个模型时四档全指向它，而不是报错或留空。"""
+    from build_litellm_config import pick_tier_models
+
+    tiers = pick_tier_models(["deepseek-v41-flash"])
+
+    assert set(tiers.values()) == {"deepseek-v41-flash"}
+
+
+def test_claude_settings_carry_the_1m_suffix():
+    """Claude Code 的档位必须带 [1M]，否则它按 200k 算、提前 auto-compact。"""
+    import json
+    from build_litellm_config import render_claude_settings
+
+    env = json.loads(render_claude_settings(["deepseek-v41-flash", "GLM-5.3-Flash"]))["env"]
+
+    for key in ["ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_MODEL"]:
+        assert key in env, f"缺少 {key}"
+        assert env[key].endswith("[1M]"), f"{key}={env[key]} 应带 [1M]"
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
+
+
+def test_claude_settings_base_url_has_no_v1():
+    """Claude Code 的 BASE_URL 带 /v1 会变成 /v1/v1/messages -> 404。"""
+    import json
+    from build_litellm_config import render_claude_settings
+
+    env = json.loads(render_claude_settings(["deepseek-v41-flash"]))["env"]
+
+    assert not env["ANTHROPIC_BASE_URL"].endswith("/v1")
+
+
+def test_codex_toml_has_v1_and_no_1m_suffix():
+    """Codex 相反：/v1 要带，[1M] 不能带（它会原样透传 -> 400）。
+
+    只看生效的配置行，跳过注释 —— 注释里会提到 [1M] 作为反例说明。
+    """
+    from build_litellm_config import render_codex_toml
+
+    toml = render_codex_toml(["deepseek-v41-flash"])
+    # 去掉注释行后，剩下的才是 Codex 真正会读的配置
+    active = "\n".join(l for l in toml.splitlines() if not l.lstrip().startswith("#"))
+
+    assert 'base_url = "http://127.0.0.1:4000/v1"' in active
+    assert 'wire_api = "responses"' in active
+    assert 'model = "deepseek-v41-flash"' in active
+    assert "[1M]" not in active
+
+
+def test_opencode_lists_every_model_verbatim():
+    """范本要覆盖 models.yaml 全部模型，且不带 [1M]。"""
+    import json
+    from build_litellm_config import render_opencode
+
+    models = ["deepseek-v41-flash", "/models/Qwen3.8-Flash-Next", "1.Qwen3.5-27B"]
+    cfg = json.loads(render_opencode(models))
+    listed = cfg["provider"]["ujn-llm"]["models"]
+
+    assert list(listed.keys()) == models
+    assert "[1M]" not in json.dumps(cfg)
+
+
+def test_client_templates_accept_a_custom_port():
+    """端口固定 4000，但函数要能改 —— 便于测试与将来换端口。"""
+    import json
+    from build_litellm_config import render_claude_settings, render_codex_toml
+
+    assert ":4123" in json.loads(render_claude_settings(["m"], port=4123))["env"]["ANTHROPIC_BASE_URL"]
+    assert ":4123" in render_codex_toml(["m"], port=4123)
+
+
+def test_emit_client_templates_is_idempotent(tmp_path):
+    """同一份 models.yaml 重复生成，内容不变 —— 否则每次同步都产生无意义 diff。"""
+    from build_litellm_config import emit_client_templates
+
+    models = ["deepseek-v41-flash", "GLM-5.3-Flash"]
+    written1 = emit_client_templates(models, tmp_path)
+    snapshot = {p.name: p.read_text(encoding="utf-8") for p in written1}
+
+    written2 = emit_client_templates(models, tmp_path)
+    snapshot2 = {p.name: p.read_text(encoding="utf-8") for p in written2}
+
+    assert snapshot == snapshot2
+    assert set(snapshot) == {"claude-settings.json", "ccswitch.json",
+                             "codex-config-snippet.toml", "opencode.json"}
+
+
+def test_emitted_json_files_are_parseable(tmp_path):
+    """生成的 JSON 必须能被解析 —— 手工拼字符串最容易在这里翻车。"""
+    import json
+    from build_litellm_config import emit_client_templates
+
+    for path in emit_client_templates(["deepseek-v41-flash"], tmp_path):
+        if path.suffix == ".json":
+            json.loads(path.read_text(encoding="utf-8"))   # 不抛即通过

@@ -1,17 +1,4 @@
 {
-  "name": "ujn-llm",
-  "apiKey": "dummy",
-  "baseURL": "http://127.0.0.1:4000",
-  "meta": {
-    "apiFormat": "anthropic"
-  },
-  "models": {
-    "default": "deepseek-v41-flash",
-    "fable": "deepseek-v41-flash",
-    "opus": "deepseek-v41-flash",
-    "sonnet": "GLM-5.3-Flash",
-    "haiku": "GLM-5.3-Flash"
-  },
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",

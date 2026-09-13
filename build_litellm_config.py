@@ -22,6 +22,8 @@ CONFIG_FILE = BASE_DIR / "config.yaml"
 STATE_FILE = BASE_DIR / "ujn_webvpn_state.json"
 MODELS_FILE = BASE_DIR / "models.yaml"
 DEFAULT_OUT = BASE_DIR / "litellm_config.yaml"
+CLIENTS_DIR = BASE_DIR / "clients"
+DEFAULT_PORT = 4000
 
 WEBVPN_ORIGIN = "https://webvpn.ujn.edu.cn"
 USER_AGENT = (
@@ -210,6 +212,168 @@ def build_target_url(api_base: str, host_query: str) -> str:
     return url
 
 
+# --- 客户端范本生成 ---------------------------------------------------------
+# 范本从 models.yaml 派生，避免手写后与真实模型清单漂移（历史上就漂移过：
+# ccswitch.json 缺了 FABLE 档与 [1M] 后缀，opencode.json 少一个模型）。
+
+# 四档默认值。两个都是实测最快且 1M 上下文的模型。
+TIER_FABLE  = "deepseek-v41-flash"
+TIER_OPUS   = "deepseek-v41-flash"
+TIER_SONNET = "GLM-5.3-Flash"
+TIER_HAIKU  = "GLM-5.3-Flash"
+
+# Claude Code 需要 [1M] 后缀才会把上下文按 1M 计（否则按 200k 提前 auto-compact）。
+# 其他客户端不能带 —— 它们原样透传，上游查不到该名字会 400。
+CLAUDE_SUFFIX = "[1M]"
+
+
+def pick_tier_models(models: list[str]) -> dict[str, str]:
+    """为四个档位挑模型；首选模型不在清单里时退回第一个可用的。"""
+    if not models:
+        raise SystemExit("models 为空，无法挑选档位模型")
+    fallback = models[0]
+
+    def choose(preferred: str) -> str:
+        return preferred if preferred in models else fallback
+
+    return {
+        "fable":  choose(TIER_FABLE),
+        "opus":   choose(TIER_OPUS),
+        "sonnet": choose(TIER_SONNET),
+        "haiku":  choose(TIER_HAIKU),
+    }
+
+
+def render_claude_settings(models: list[str], port: int = 4000) -> str:
+    """Claude Code 的 settings.json 范本。
+
+    BASE_URL 不带 /v1（带了会变成 /v1/v1/messages -> 404）。
+    四个档位都带 [1M]。
+    """
+    tiers = pick_tier_models(models)
+    base = f"http://127.0.0.1:{port}"
+
+    settings = {
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "dummy",
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL":  tiers["fable"]  + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":   tiers["opus"]   + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers["sonnet"] + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL":  tiers["haiku"]  + CLAUDE_SUFFIX,
+            "ANTHROPIC_MODEL": tiers["fable"] + CLAUDE_SUFFIX,
+            "NO_PROXY": "localhost,127.0.0.1",
+            "no_proxy": "localhost,127.0.0.1",
+        }
+    }
+    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+
+
+def render_ccswitch(models: list[str], port: int = 4000) -> str:
+    """CC Switch 的供应商配置范本（供 Claude Code 多供应商切换时用）。"""
+    tiers = pick_tier_models(models)
+    base = f"http://127.0.0.1:{port}"
+
+    cfg = {
+        "name": "ujn-llm",
+        "apiKey": "dummy",
+        "baseURL": base,
+        "meta": {"apiFormat": "anthropic"},
+        "models": {
+            "default": tiers["fable"],
+            "fable":  tiers["fable"],
+            "opus":   tiers["opus"],
+            "sonnet": tiers["sonnet"],
+            "haiku":  tiers["haiku"],
+        },
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "dummy",
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_DEFAULT_FABLE_MODEL":  tiers["fable"]  + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":   tiers["opus"]   + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers["sonnet"] + CLAUDE_SUFFIX,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL":  tiers["haiku"]  + CLAUDE_SUFFIX,
+            "ANTHROPIC_MODEL": tiers["fable"] + CLAUDE_SUFFIX,
+            "NO_PROXY": "localhost,127.0.0.1",
+            "no_proxy": "localhost,127.0.0.1",
+        },
+    }
+    return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+
+def render_codex_toml(models: list[str], port: int = 4000) -> str:
+    """Codex 的 config.toml 片段。
+
+    与 Claude Code 相反：base_url 要带 /v1，模型名不能带 [1M]。
+    Codex 只接受 wire_api = "responses"（"chat" 已被官方移除）。
+    """
+    tiers = pick_tier_models(models)
+    model = tiers["fable"]
+
+    return f'''# 把以下内容合并进 ~/.codex/config.toml
+#
+# 关键：current Codex 只接受 wire_api = "responses"，
+# "chat" 已被官方移除（会报 "wire_api = "chat" is no longer supported"）。
+# LiteLLM 的 /v1/responses 正是为此准备的。
+#
+# model 填上游真实模型名（见 models.yaml），不要填 gpt-*/claude-* 之类的别名。
+# 【不要】加 [1M] 后缀 —— 那是 Claude Code 专用标记，Codex 会原样透传导致 400。
+
+model = "{model}"
+model_provider = "ujn"
+
+[model_providers.ujn]
+name = "UJN LLM API"
+base_url = "http://127.0.0.1:{port}/v1"
+env_key = "UJN_DUMMY_KEY"
+wire_api = "responses"
+request_max_retries = 3
+stream_max_retries = 3
+stream_idle_timeout_ms = 300000
+'''
+
+
+def render_opencode(models: list[str], port: int = 4000) -> str:
+    """OpenCode 配置范本，覆盖 models.yaml 全部模型。"""
+    cfg = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            "ujn-llm": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "UJN LLM",
+                "options": {
+                    "baseURL": f"http://127.0.0.1:{port}/v1",
+                    "apiKey": "dummy",
+                },
+                "models": {m: {"name": m} for m in models},
+            }
+        },
+    }
+    return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+
+
+def emit_client_templates(models: list[str], out_dir: Path, port: int = 4000) -> list[Path]:
+    """把四份客户端范本写到 out_dir，返回写出的文件列表。
+
+    内容不变时不重写（保持 mtime 稳定，避免无意义的 diff 抖动）。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = {
+        "claude-settings.json":      render_claude_settings(models, port),
+        "ccswitch.json":             render_ccswitch(models, port),
+        "codex-config-snippet.toml": render_codex_toml(models, port),
+        "opencode.json":             render_opencode(models, port),
+    }
+
+    written: list[Path] = []
+    for name, content in files.items():
+        path = out_dir / name
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
+            path.write_text(content, encoding="utf-8")
+        written.append(path)
+    return written
+
+
 def render_config(settings: dict[str, str], cookie_header: str, models: list[str]) -> str:
     """生成 LiteLLM 配置文本。纯函数，不联网、不读文件。
 
@@ -241,6 +405,10 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[str
                     # 不加这条，Codex 的请求会把 input 直接发给上游 -> KeyError 'messages'。
                     "use_chat_completions_api": True,
                     "extra_headers": dict(headers),
+                    # 丢弃 reasoning_effort：上游对取值挑食（deepseek 拒绝 medium），
+                    # 且 Codex 的 reasoning={effort,summary} 会被 LiteLLM 整份 dict
+                    # 塞进 reasoning_effort，直接 400。丢弃后上游用自身默认推理强度。
+                    "additional_drop_params": ["reasoning_effort"],
                 },
             }
         )
@@ -292,6 +460,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="生成 LiteLLM 配置（注入 WebVPN Cookie）。")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--models-file", default=str(MODELS_FILE))
+    parser.add_argument("--clients-dir", default=str(CLIENTS_DIR),
+                        help="客户端范本的输出目录（默认 clients/）")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="写进客户端范本的代理端口（默认 4000）")
     parser.add_argument("--list-upstream", action="store_true",
                         help="列出上游当前可用模型，然后退出")
     parser.add_argument("--sync-models", action="store_true",
@@ -354,6 +526,11 @@ def main() -> None:
     print(f"  上游 URL : ...{build_target_url(settings['api_base'], settings['host_query'])[-70:]}")
     print(f"  Cookie   : {len(cookie_header)} 字符")
     print(f"  模型数   : {len(models)} 个")
+
+    # 客户端范本跟着 models.yaml 一起更新，避免手写后漂移。
+    client_dir = Path(args.clients_dir)
+    written = emit_client_templates(models, client_dir, port=args.port)
+    print(f"  客户端范本: {client_dir.name}/ 下 {len(written)} 个文件（模型清单已同步）")
 
 
 if __name__ == "__main__":
