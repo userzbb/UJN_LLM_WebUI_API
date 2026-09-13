@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ujn-llm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "UJN LLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:4000/v1",
+        "apiKey": "dummy"
+      },
+      "models": {
+        "GLM-5.3": { "name": "GLM-5.3" },
+        "deepseek-v41-flash": { "name": "DeepSeek-V4.1-Flash" },
+        "1.Qwen3.5-27B": { "name": "Qwen3.5-27B" },
+        "Qwen3.6-27B": { "name": "Qwen3.6-27B" }
+      }
+    }
+  }
+}

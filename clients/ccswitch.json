@@ -1,0 +1,26 @@
+{
+  "apiKey": "dummy",
+  "baseURL": "http://127.0.0.1:4000",
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "dummy",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Qwen3.5-27B",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "DeepSeek-V4.1-Flash",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-1",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GLM-5.3",
+    "NO_PROXY": "localhost,127.0.0.1",
+    "no_proxy": "localhost,127.0.0.1"
+  },
+  "includeCoAuthoredBy": false,
+  "meta": {
+    "apiFormat": "anthropic"
+  },
+  "models": {
+    "default": "claude-sonnet-4-5",
+    "haiku": "claude-haiku-4-5",
+    "opus": "claude-opus-4-1",
+    "sonnet": "claude-sonnet-4-5"
+  }
+}

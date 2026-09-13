@@ -1,0 +1,17 @@
+# 把以下内容合并进 ~/.codex/config.toml
+#
+# 关键：current Codex 只接受 wire_api = "responses"，
+# "chat" 已被官方移除（会报 "wire_api = "chat" is no longer supported"）。
+# LiteLLM 的 /v1/responses 正是为此准备的。
+
+model = "gpt-5.1-codex"
+model_provider = "ujn"
+
+[model_providers.ujn]
+name = "UJN LLM API"
+base_url = "http://127.0.0.1:4000/v1"
+env_key = "UJN_DUMMY_KEY"
+wire_api = "responses"
+request_max_retries = 3
+stream_max_retries = 3
+stream_idle_timeout_ms = 300000
