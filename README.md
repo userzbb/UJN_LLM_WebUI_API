@@ -226,6 +226,12 @@ uv run python build_litellm_config.py --list-upstream
 uv run python build_litellm_config.py
 ```
 
+**Claude Code 开启 thinking 时报 `400`**
+→ 确认 `litellm_config.yaml` 里的 model 前缀是 `hosted_vllm/` 而不是 `openai/`。
+LiteLLM 内部有 `_RESPONSES_API_PROVIDERS = frozenset({"openai"})`：只要 provider 是
+`openai`，带 thinking 的 `/v1/messages` 请求就会被强制路由到上游的 `/responses` 端点，
+而 ChatUJN 没有该端点，直接 400。`hosted_vllm` 不在该集合里，且语义上更贴合真实后端（vLLM）。
+
 **`Model not found`**
 → 上游模型下线了。运行 `--list-upstream` 查看当前清单，更新 `models.yaml`。
 
@@ -405,6 +411,13 @@ uv run python build_litellm_config.py --list-upstream
 
 **`400` mentioning `'messages'` or `'created_at'`** → one of the two bridge flags is
 missing. Regenerate the config.
+
+**Claude Code returns `400` when thinking is enabled** → check that the model prefix in
+`litellm_config.yaml` is `hosted_vllm/`, not `openai/`. LiteLLM has
+`_RESPONSES_API_PROVIDERS = frozenset({"openai"})`: with the `openai` provider, any
+`/v1/messages` request carrying thinking is force-routed to the upstream's `/responses`
+endpoint, which ChatUJN does not expose (400). `hosted_vllm` is absent from that set and
+matches the real backend (vLLM).
 
 **`Model not found`** → the upstream model was retired. Run `--list-upstream` and update
 `models.yaml`.
