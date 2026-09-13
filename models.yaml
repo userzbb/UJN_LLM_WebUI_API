@@ -1,0 +1,20 @@
+# 上游模型 id -> 客户端可见的别名列表。
+# 别名让客户端可以用熟悉的模型名（如 claude-opus-4-1）驱动上游模型。
+# 上游模型清单会变，用 `uv run python build_litellm_config.py --list-upstream` 查看当前值。
+models:
+  - upstream: GLM-5.3
+    aliases: [GLM-5.3, claude-opus-4-1, gpt-5.1-codex]
+  - upstream: deepseek-v41-flash
+    aliases: [deepseek-v41-flash, claude-sonnet-4-5]
+  - upstream: 1.Qwen3.5-27B
+    aliases: [1.Qwen3.5-27B, claude-haiku-4-5]
+  - upstream: Qwen3.6-27B
+    aliases: [Qwen3.6-27B]
+  - upstream: GLM-5.3-Flash
+    aliases: [GLM-5.3-Flash]
+  - upstream: deepseek-v4-flash
+    aliases: [deepseek-v4-flash]
+  - upstream: Qwen3.8-27B
+    aliases: [Qwen3.8-27B]
+  - upstream: /models/Qwen3.8-Flash-Next
+    aliases: [/models/Qwen3.8-Flash-Next]
