@@ -4,9 +4,6 @@
 让 **Claude Code、Codex、OpenCode** 以及任何 OpenAI / Anthropic 客户端都能直接接入，
 并完整支持**工具调用**（并行工具、流式增量参数、`tool_result` 回传）。
 
-Expose UJN's WebVPN-only ChatUJN as a local LLM API for Claude Code, Codex, OpenCode,
-and any OpenAI/Anthropic-compatible client — with full tool-calling support.
-
 ---
 
 # 中文说明
@@ -183,6 +180,25 @@ litellm_settings:
 > —— 里面列出了所有可直接填写 Base URL / API Key / 模型 ID，以及每个客户端的逐步配置。
 
 > `clients/` 下的文件是**参考范本**，请根据你的环境自行配置 CC Switch 与各工具。
+> 它们由 `build_litellm_config.py` **自动生成**（跟着 `models.yaml` 同步），
+> 所以里面的模型清单不会写歪。改完 `models.yaml` 重新生成即可：
+
+```powershell
+uv run python build_litellm_config.py   # 同时刷新 litellm_config.yaml 和 clients/*
+
+```
+
+| 范本 | 给谁用 |
+|---|---|
+| `clients/claude-settings.json` | Claude Code —— 可直接作为 `~/.claude/settings.json` 的 `env` 段 |
+| `clients/ccswitch.json` | CC Switch 供应商配置 |
+| `clients/codex-config-snippet.toml` | Codex —— 合并进 `~/.codex/config.toml` |
+| `clients/opencode.json` | OpenCode |
+
+> ⚠ **两处易错点，范本已按实测填好：**
+> Claude Code 的模型名**要带 `[1M]`**（不带只算 200k，会提前 auto-compact），
+> 且 `ANTHROPIC_BASE_URL` **不带 `/v1`**；
+> Codex 恰好相反 —— `base_url` **带 `/v1`**，模型名**不带 `[1M]`**。
 
 ### Claude Code（直连，无需 CC Switch）
 
@@ -308,6 +324,29 @@ LiteLLM 内部有 `_RESPONSES_API_PROVIDERS = frozenset({"openai"})`：只要 pr
 `openai`，带 thinking 的 `/v1/messages` 请求就会被强制路由到上游的 `/responses` 端点，
 而 ChatUJN 没有该端点，直接 400。`hosted_vllm` 不在该集合里，且语义上更贴合真实后端（vLLM）。
 
+**Codex 报 `reasoning_effort` 相关 `400`**
+→ 上游对 effort 取值挑食（`deepseek-v41-flash` 拒绝 `medium`，报
+`DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max...`），
+且 Codex 的 `reasoning: {effort, summary}` 会被 LiteLLM 整份 dict 塞进 `reasoning_effort`
+（见 `litellm/responses/litellm_completion_transformation/transformation.py`），
+上游收到 dict 后报 `literal_error`。
+
+本项目已自动丢弃该字段 —— 确认每个部署都带：
+
+```yaml
+litellm_params:
+  additional_drop_params: ["reasoning_effort"]
+```
+
+`build_litellm_config.py` 会自动写入，重新生成配置并重启即可。
+
+> ⚠ 代价：**effort 档位不再实际调节推理强度**，上游用自身默认值。
+> 实测丢弃前后无质量损失（同题采样，输出与 reasoning 长度同区间）。
+
+**两个客户端的 effort 字段不一样**
+→ Claude Code 用 `output_config.effort`，Codex 用 `reasoning: {effort, summary}`。
+两者的形态现在都能通 —— 因为都统一丢弃了。
+
 **`Model not found`**
 → 上游模型下线了。运行 `--list-upstream` 查看当前清单，更新 `models.yaml`。
 
@@ -332,259 +371,6 @@ uv run python ujn_webvpn_login.py --headless
 
 ---
 
-# English Guide
-
-## What This Is
-
-ChatUJN is reachable only through the campus WebVPN, and it requires **both** a WebVPN
-cookie **and** an API key — the key alone redirects to a login page (measured: `302`).
-It also speaks only **OpenAI Chat Completions**, which Claude Code (Anthropic Messages)
-and Codex (Responses API) cannot use.
-
-This project runs a **LiteLLM proxy** that translates all three protocols to a single local
-endpoint at `http://127.0.0.1:4000`.
-
-## Architecture
-
-```text
-Claude Code   ──Anthropic /v1/messages──┐
-Codex CLI     ──Responses /v1/responses─┤
-OpenCode      ──OpenAI /v1/chat/...─────┼──→ http://127.0.0.1:4000
-OpenAI SDK    ──OpenAI /v1/chat/...─────┘         │
-                                                  ↓
-                                    LiteLLM Proxy (protocol translation + tool calls)
-                                                  │
-                                    WebVPN cookie + UJN API key
-                                                  ↓
-                                    ChatUJN (Open WebUI v0.5.16 + vLLM)
-```
-
-## Endpoints
-
-| Endpoint | Protocol | Used by |
-|---|---|---|
-| `GET /health/liveliness` | — | health check |
-| `GET /v1/models` | OpenAI | model list |
-| `POST /v1/chat/completions` | OpenAI | OpenCode, OpenAI SDK |
-| `POST /v1/messages` | Anthropic | Claude Code |
-| `POST /v1/messages/count_tokens` | Anthropic | token counting |
-| `POST /v1/responses` | OpenAI Responses | Codex CLI |
-
-## Setup
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.12.
-
-```powershell
-uv sync
-uv run playwright install chromium
-Copy-Item config.yaml.example config.yaml
-```
-
-Edit `config.yaml` with your WebVPN credentials, ChatUJN API key, and the WebVPN host query.
-
-**The `<opaque>` path segment needs no copying** — it is an *encoding of the hostname*,
-not a secret: `"wrdvpnisthebest!"` (a public constant shared by all WebVPN deployments)
-followed by AES-CTR of the host. The same hostname always yields the same value for every
-user, and holding it without a valid session only gets you redirected to the login page.
-Leave `<opaque>` in place and the script derives it from `webvpn_host_query`:
-
-```powershell
-uv run python build_litellm_config.py --webvpn-path chat.ujn.edu.cn
-```
-
-`config.yaml` is git-ignored. Never commit or share it.
-
-## Run
-
-```powershell
-.\run.ps1
-```
-
-If PowerShell blocks script execution:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
-```
-
-The launcher refreshes the WebVPN login, generates `litellm_config.yaml`, starts a
-background job that refreshes the session every 30 minutes, and starts the proxy in the
-foreground on port 4000.
-
-> ⚠ **LiteLLM reads `litellm_config.yaml` once at startup.** After a background cookie
-> refresh you must **restart `run.ps1`** for it to take effect. This is measured behavior:
-> changing the cookie on disk while the server runs does not change what it sends upstream.
-
-Verify:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:4000/health/liveliness
-uv run python tests/smoke_test.py
-```
-
-## Tool Calling
-
-Measured working (covered by `tests/smoke_test.py`):
-
-- **Parallel tool calls** — multiple `tool_use` / `function_call` in one response
-- **Streaming incremental arguments** — Anthropic `input_json_delta`, Responses
-  `response.function_call_arguments.delta`
-- **`tool_result` round-trip** — multi-turn tool loops
-- **`tool_choice`** — `auto` / `any` / `tool` (Anthropic), `auto` / `required` (OpenAI)
-
-### The two flags that must both be set
-
-This is the crux of the project. By default LiteLLM forwards Anthropic and Responses
-requests as **Responses-protocol** to the upstream, but ChatUJN speaks only **Chat
-Completions** — yielding HTTP 400. Both flags are required:
-
-```yaml
-model_list:
-  - model_name: GLM-5.3                        # upstream name verbatim
-    litellm_params:
-      model: hosted_vllm/GLM-5.3               # not openai/ — see below
-      use_chat_completions_api: true           # ← flag 1 (per deployment)
-litellm_settings:
-  use_chat_completions_url_for_anthropic_messages: true   # ← flag 2 (global)
-```
-
-`build_litellm_config.py` writes both automatically. Do not remove either one.
-
-## Client Setup
-
-> 📖 **Full configuration guide: [`docs/客户端配置指南.md`](docs/客户端配置指南.md)**
-> — lists every Base URL / API key / model ID to paste, plus per-client steps (in Chinese).
-
-> Files under `clients/` are **reference templates** — configure CC Switch and each CLI
-> for your own environment.
-
-### Claude Code (direct — CC Switch not required)
-
-```powershell
-$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4000"
-$env:ANTHROPIC_AUTH_TOKEN = "dummy"
-claude
-```
-
-> ⚠ `ANTHROPIC_BASE_URL` takes **no** `/v1` suffix. LiteLLM serves `/v1/messages` at the
-> root and the client appends `/v1` itself.
-
-### Codex CLI
-
-Merge `clients/codex-config-snippet.toml` into `~/.codex/config.toml` and set:
-
-```powershell
-setx UJN_DUMMY_KEY "dummy"
-```
-
-> ⚠ Codex now accepts **only** `wire_api = "responses"`; `"chat"` was removed upstream.
-
-### OpenCode
-
-Copy `clients/opencode.json` into your project or `~/.config/opencode/opencode.json`.
-
-## Model List
-
-Models are exposed **under their upstream names verbatim** — no alias mapping. Clients use
-exactly the names listed in `models.yaml`:
-
-```yaml
-models:
-  - deepseek-v41-flash
-  - GLM-5.3
-  - GLM-5.3-Flash
-```
-
-Currently available (measured **2026-09-14**, 8 models) — **largest context first**.
-All eight are callable; the notes rank preference only — `not recommended` ≠ `unavailable`.
-
-> ⚠ **The upstream changes over time** (models are retired, added, or renamed). The table
-> above is a 2026-09-14 snapshot, not a permanent guarantee. Trust `--list-upstream` — see below.
-
-| Model ID | Context | Notes |
-|---|---|---|
-| `deepseek-v41-flash` | **1M** | ⭐ recommended main: newest generation, largest context |
-| `GLM-5.3-Flash` | **1M** | ⭐ recommended: fastest |
-| `deepseek-v4-flash` | **1M** | available |
-| `Qwen3.8-27B` | 256K | available (unusable from Claude Code — see below) |
-| `Qwen3.6-27B` | 256K | same |
-| `/models/Qwen3.8-Flash-Next` | 256K | same |
-| `GLM-5.3` | 128K | available but not recommended: only non-1M model, and slowest |
-| `1.Qwen3.5-27B` | — | least recommended: oldest (3.5 generation) |
-
-Recommended main: `deepseek-v41-flash` (1M context, newest generation).
-
-### Listing the currently available models
-
-**`Model not found` means the upstream list changed.** Two queries tell you what is there:
-
-```powershell
-# 1) What the upstream actually offers (authoritative, includes context length)
-uv run python build_litellm_config.py --list-upstream
-
-# 2) What this proxy exposes (the names clients may use)
-(Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
-```
-
-**Use an `id` from the returned list as the model name.** Or sync in one step:
-
-```powershell
-uv run python build_litellm_config.py --sync-models
-```
-
-This updates `models.yaml` from the upstream list and reports what was added or retired;
-it leaves the file untouched when already in sync. Then regenerate and restart:
-
-```powershell
-uv run python build_litellm_config.py
-# then Ctrl+C the proxy and re-run run.ps1
-```
-
-### ⚠ The Qwen family cannot be used from Claude Code
-
-The Qwen models (`Qwen3.8-27B`, `Qwen3.6-27B`, `/models/Qwen3.8-Flash-Next`,
-`1.Qwen3.5-27B`) **always `400` under Claude Code**, regardless of configuration:
-
-```
-400: System message must be at the beginning.
-```
-
-Claude Code puts its `Available agent types...` block in `messages` as a `role: "system"`
-message at **index 1**, while the upstream vLLM requires a system message to come first for
-Qwen models (deepseek/GLM tolerate it). This is Claude Code's behavior and cannot be fixed
-in the proxy. **OpenAI-compatible clients (OpenCode, SDK) use Qwen fine.**
-
-## Troubleshooting
-
-**`400` mentioning `'messages'` or `'created_at'`** → one of the two bridge flags is
-missing. Regenerate the config.
-
-**Claude Code returns `400` when thinking is enabled** → check that the model prefix in
-`litellm_config.yaml` is `hosted_vllm/`, not `openai/`. LiteLLM has
-`_RESPONSES_API_PROVIDERS = frozenset({"openai"})`: with the `openai` provider, any
-`/v1/messages` request carrying thinking is force-routed to the upstream's `/responses`
-endpoint, which ChatUJN does not expose (400). `hosted_vllm` is absent from that set and
-matches the real backend (vLLM).
-
-**`Model not found`** → the upstream list changed (model retired or renamed). Check what the
-upstream offers with `uv run python build_litellm_config.py --list-upstream`, and what this
-proxy exposes with `(Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id`, then update
-`models.yaml` and regenerate.
-
-**Startup crash `UnicodeDecodeError: 'gbk' codec`** → `litellm_config.yaml` contains
-non-ASCII characters. LiteLLM reads it with the system default codec; the generator
-already validates this — never hand-write Chinese into that file.
-
-**`302` / `502`** → WebVPN cookie expired. Re-login and restart.
-
-**Claude Code connection error** → confirm `ANTHROPIC_BASE_URL` is
-`http://127.0.0.1:4000` (**no** `/v1`).
-
-**`run.ps1` syntax error `unexpected }`** → the script must be saved as UTF-8 **with BOM**.
-The committed file has one; if you edit it, re-save with a BOM.
-
----
-
 ## License
 
 MIT
-# UJN_LLM_WebUI_API
