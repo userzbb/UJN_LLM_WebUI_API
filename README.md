@@ -153,6 +153,9 @@ litellm_settings:
 
 ## 客户端接入
 
+> 📖 **完整配置指南见 [`docs/客户端配置指南.md`](docs/客户端配置指南.md)**
+> —— 里面列出了所有可直接填写 Base URL / API Key / 模型 ID，以及每个客户端的逐步配置。
+
 > `clients/` 下的文件是**参考范本**，请根据你的环境自行配置 CC Switch 与各工具。
 
 ### Claude Code（直连，无需 CC Switch）
@@ -364,6 +367,9 @@ litellm_settings:
 `build_litellm_config.py` writes both automatically. Do not remove either one.
 
 ## Client Setup
+
+> 📖 **Full configuration guide: [`docs/客户端配置指南.md`](docs/客户端配置指南.md)**
+> — lists every Base URL / API key / model ID to paste, plus per-client steps (in Chinese).
 
 > Files under `clients/` are **reference templates** — configure CC Switch and each CLI
 > for your own environment.
