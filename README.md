@@ -141,9 +141,10 @@ uv run python tests/smoke_test.py
 
 ```yaml
 model_list:
-  - model_name: <别名>
+  - model_name: GLM-5.3                        # 上游原名
     litellm_params:
-      use_chat_completions_api: true          # ← 开关 1（每个部署）
+      model: hosted_vllm/GLM-5.3               # 不用 openai/，见下方说明
+      use_chat_completions_api: true           # ← 开关 1（每个部署）
 litellm_settings:
   use_chat_completions_url_for_anthropic_messages: true   # ← 开关 2（全局）
 ```
@@ -198,15 +199,31 @@ $env:NO_PROXY = "localhost,127.0.0.1"
 $env:no_proxy = "localhost,127.0.0.1"
 ```
 
-## 模型别名
+## 模型列表
 
-`models.yaml` 把上游模型 id 映射成客户端熟悉的别名：
+模型**直接以原名对外暴露**，不做别名映射 —— 客户端填的就是 `models.yaml` 里的名字：
 
 ```yaml
 models:
-  - upstream: GLM-5.3
-    aliases: [GLM-5.3, claude-opus-4-1, gpt-5.1-codex]
+  - deepseek-v41-flash
+  - GLM-5.3
+  - GLM-5.3-Flash
 ```
+
+当前可用（2026-09-13 实测）——**按上下文从大到小**：
+
+| 模型 ID | 上下文 |
+|---|---|
+| `deepseek-v41-flash` | **1M** ⭐ 推荐主力 |
+| `GLM-5.3-Flash` | **1M** |
+| `deepseek-v4-flash` | **1M** |
+| `Qwen3.8-27B` | 256K |
+| `Qwen3.6-27B` | 256K |
+| `/models/Qwen3.8-Flash-Next` | 256K |
+| `GLM-5.3` | 128K |
+| `1.Qwen3.5-27B` | — ⚠ 最旧，不推荐 |
+
+推荐主力：`deepseek-v41-flash`（1M 上下文 + 最新一代）。
 
 改完重新生成配置：
 
@@ -357,9 +374,10 @@ Completions** — yielding HTTP 400. Both flags are required:
 
 ```yaml
 model_list:
-  - model_name: <alias>
+  - model_name: GLM-5.3                        # upstream name verbatim
     litellm_params:
-      use_chat_completions_api: true          # ← flag 1 (per deployment)
+      model: hosted_vllm/GLM-5.3               # not openai/ — see below
+      use_chat_completions_api: true           # ← flag 1 (per deployment)
 litellm_settings:
   use_chat_completions_url_for_anthropic_messages: true   # ← flag 2 (global)
 ```
@@ -399,9 +417,34 @@ setx UJN_DUMMY_KEY "dummy"
 
 Copy `clients/opencode.json` into your project or `~/.config/opencode/opencode.json`.
 
-## Model Aliases
+## Model List
 
-`models.yaml` maps upstream model ids to client-friendly aliases. After editing, regenerate:
+Models are exposed **under their upstream names verbatim** — no alias mapping. Clients use
+exactly the names listed in `models.yaml`:
+
+```yaml
+models:
+  - deepseek-v41-flash
+  - GLM-5.3
+  - GLM-5.3-Flash
+```
+
+Currently available (measured 2026-09-13) — **largest context first**:
+
+| Model ID | Context |
+|---|---|
+| `deepseek-v41-flash` | **1M** ⭐ recommended main |
+| `GLM-5.3-Flash` | **1M** |
+| `deepseek-v4-flash` | **1M** |
+| `Qwen3.8-27B` | 256K |
+| `Qwen3.6-27B` | 256K |
+| `/models/Qwen3.8-Flash-Next` | 256K |
+| `GLM-5.3` | 128K |
+| `1.Qwen3.5-27B` | — ⚠ oldest, not recommended |
+
+Recommended main: `deepseek-v41-flash` (1M context, newest generation).
+
+After editing, regenerate:
 
 ```powershell
 uv run python build_litellm_config.py

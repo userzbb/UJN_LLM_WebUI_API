@@ -4,7 +4,8 @@
 # "chat" 已被官方移除（会报 "wire_api = "chat" is no longer supported"）。
 # LiteLLM 的 /v1/responses 正是为此准备的。
 
-model = "gpt-5.1-codex"
+# model 填上游真实模型名（见 models.yaml），不要填 gpt-*/claude-* 之类的别名。
+model = "deepseek-v41-flash"
 model_provider = "ujn"
 
 [model_providers.ujn]

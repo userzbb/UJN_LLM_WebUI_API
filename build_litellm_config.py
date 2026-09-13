@@ -82,11 +82,12 @@ def load_cookie_header(state_file: Path = STATE_FILE) -> str:
     return "; ".join(pairs)
 
 
-def load_models(models_file: Path = MODELS_FILE) -> list[dict]:
+def load_models(models_file: Path = MODELS_FILE) -> list[str]:
+    """读取上游模型 id 列表。直接以原名对外暴露，不做别名映射。"""
     if not models_file.exists():
         raise SystemExit(f"{models_file.name} 不存在")
     data = yaml.safe_load(models_file.read_text(encoding="utf-8")) or {}
-    models = data.get("models") or []
+    models = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
     if not models:
         raise SystemExit("models.yaml 里没有任何模型定义")
     return models
@@ -104,8 +105,10 @@ def build_target_url(api_base: str, host_query: str) -> str:
     return url
 
 
-def render_config(settings: dict[str, str], cookie_header: str, models: list[dict]) -> str:
+def render_config(settings: dict[str, str], cookie_header: str, models: list[str]) -> str:
     """生成 LiteLLM 配置文本。纯函数，不联网、不读文件。
+
+    模型直接以原名对外暴露（model_name 就是上游 id），不做别名映射。
 
     用 yaml.safe_dump 而不是手工拼字符串：Cookie / api_key 的取值来自服务端，
     可能包含 `"` 等字符；手工插值会产出非法 YAML，导致 LiteLLM 启动时解析失败。
@@ -116,30 +119,26 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[dic
     headers["Cookie"] = cookie_header
 
     model_list: list[dict] = []
-    for entry in models:
-        upstream = entry.get("upstream")
-        if not upstream:
-            continue
-        for alias in entry.get("aliases") or []:
-            model_list.append(
-                {
-                    "model_name": alias,
-                    "litellm_params": {
-                        # 用 hosted_vllm 而不是 openai：LiteLLM 内部有
-                        #   _RESPONSES_API_PROVIDERS = frozenset({"openai"})
-                        # 只要是 openai provider，带 thinking 的 /v1/messages 请求就会被强制
-                        # 路由到上游的 /responses 端点（本项目上游没有该端点，直接 400）。
-                        # hosted_vllm 不在该集合中，且语义上更贴合真实后端（vLLM）。
-                        "model": f"hosted_vllm/{upstream}",
-                        "api_base": url,
-                        "api_key": settings["api_key"],
-                        # 开关 1：强制把 /v1/responses 桥接到上游的 chat/completions。
-                        # 不加这条，Codex 的请求会把 input 直接发给上游 -> KeyError 'messages'。
-                        "use_chat_completions_api": True,
-                        "extra_headers": dict(headers),
-                    },
-                }
-            )
+    for upstream in models:
+        model_list.append(
+            {
+                "model_name": upstream,
+                "litellm_params": {
+                    # 用 hosted_vllm 而不是 openai：LiteLLM 内部有
+                    #   _RESPONSES_API_PROVIDERS = frozenset({"openai"})
+                    # 只要是 openai provider，带 thinking 的 /v1/messages 请求就会被强制
+                    # 路由到上游的 /responses 端点（本项目上游没有该端点，直接 400）。
+                    # hosted_vllm 不在该集合中，且语义上更贴合真实后端（vLLM）。
+                    "model": f"hosted_vllm/{upstream}",
+                    "api_base": url,
+                    "api_key": settings["api_key"],
+                    # 开关 1：强制把 /v1/responses 桥接到上游的 chat/completions。
+                    # 不加这条，Codex 的请求会把 input 直接发给上游 -> KeyError 'messages'。
+                    "use_chat_completions_api": True,
+                    "extra_headers": dict(headers),
+                },
+            }
+        )
 
     config = {
         "model_list": model_list,
@@ -203,11 +202,10 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.write_text(content, encoding="utf-8")
 
-    total = sum(len(m.get("aliases") or []) for m in models)
     print(f"已生成: {out_path}")
     print(f"  上游 URL : ...{build_target_url(settings['api_base'], settings['host_query'])[-70:]}")
     print(f"  Cookie   : {len(cookie_header)} 字符")
-    print(f"  模型别名 : {total} 个")
+    print(f"  模型数   : {len(models)} 个")
 
 
 if __name__ == "__main__":

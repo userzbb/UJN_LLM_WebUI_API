@@ -9,10 +9,13 @@
         "apiKey": "dummy"
       },
       "models": {
-        "GLM-5.3": { "name": "GLM-5.3" },
-        "deepseek-v41-flash": { "name": "DeepSeek-V4.1-Flash" },
-        "1.Qwen3.5-27B": { "name": "Qwen3.5-27B" },
-        "Qwen3.6-27B": { "name": "Qwen3.6-27B" }
+        "deepseek-v41-flash": { "name": "DeepSeek-V4.1-Flash (1M)" },
+        "GLM-5.3": { "name": "GLM-5.3 (128K)" },
+        "GLM-5.3-Flash": { "name": "GLM-5.3-Flash (1M)" },
+        "deepseek-v4-flash": { "name": "DeepSeek-V4-Flash (1M)" },
+        "Qwen3.8-27B": { "name": "Qwen3.8-27B (256K)" },
+        "Qwen3.6-27B": { "name": "Qwen3.6-27B (256K)" },
+        "/models/Qwen3.8-Flash-Next": { "name": "Qwen3.8-Flash-Next (256K)" }
       }
     }
   }

@@ -38,9 +38,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:4000")
-    parser.add_argument("--chat-model", default="1.Qwen3.5-27B")
-    parser.add_argument("--anthropic-model", default="claude-sonnet-4-5")
-    parser.add_argument("--responses-model", default="gpt-5.1-codex")
+    parser.add_argument("--chat-model", default="deepseek-v41-flash")
+    parser.add_argument("--anthropic-model", default="deepseek-v41-flash")
+    parser.add_argument("--responses-model", default="GLM-5.3")
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args()
 
