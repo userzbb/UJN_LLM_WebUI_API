@@ -125,7 +125,12 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[dic
                 {
                     "model_name": alias,
                     "litellm_params": {
-                        "model": f"openai/{upstream}",
+                        # 用 hosted_vllm 而不是 openai：LiteLLM 内部有
+                        #   _RESPONSES_API_PROVIDERS = frozenset({"openai"})
+                        # 只要是 openai provider，带 thinking 的 /v1/messages 请求就会被强制
+                        # 路由到上游的 /responses 端点（本项目上游没有该端点，直接 400）。
+                        # hosted_vllm 不在该集合中，且语义上更贴合真实后端（vLLM）。
+                        "model": f"hosted_vllm/{upstream}",
                         "api_base": url,
                         "api_key": settings["api_key"],
                         # 开关 1：强制把 /v1/responses 桥接到上游的 chat/completions。
