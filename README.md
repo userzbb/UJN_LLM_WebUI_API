@@ -210,32 +210,56 @@ models:
   - GLM-5.3-Flash
 ```
 
-当前可用（2026-09-13 实测）——**按上下文从大到小**：
+当前可用（实测于 **2026-09-14**，共 8 个）——**按上下文从大到小**。
+下列 8 个**都能调用**，只是推荐程度不同；`不推荐` ≠ `不可用`。
 
-| 模型 ID | 上下文 |
-|---|---|
-| `deepseek-v41-flash` | **1M** ⭐ 推荐主力 |
-| `GLM-5.3-Flash` | **1M** |
-| `deepseek-v4-flash` | **1M** |
-| `Qwen3.8-27B` | 256K |
-| `Qwen3.6-27B` | 256K |
-| `/models/Qwen3.8-Flash-Next` | 256K |
-| `GLM-5.3` | 128K |
-| `1.Qwen3.5-27B` | — ⚠ 最旧，不推荐 |
+> ⚠ **上游会更新**（模型会下线、新增、改名），上表是 2026-09-14 的快照，
+> 不代表永远有效。以 `--list-upstream` 的实时输出为准（见下文）。
+
+| 模型 ID | 上下文 | 说明 |
+|---|---|---|
+| `deepseek-v41-flash` | **1M** | ⭐ 推荐主力：最新一代 + 上下文最大 |
+| `GLM-5.3-Flash` | **1M** | ⭐ 推荐：最快 |
+| `deepseek-v4-flash` | **1M** | 可用 |
+| `Qwen3.8-27B` | 256K | 可用（Claude Code 用不了，见下） |
+| `Qwen3.6-27B` | 256K | 同上 |
+| `/models/Qwen3.8-Flash-Next` | 256K | 同上 |
+| `GLM-5.3` | 128K | 可用但不推荐：唯一不是 1M，且最慢 |
+| `1.Qwen3.5-27B` | — | 最不推荐：最旧（3.5 世代） |
 
 推荐主力：`deepseek-v41-flash`（1M 上下文 + 最新一代）。
 
-改完重新生成配置：
+### 查看当前可用模型
+
+**遇到 `Model not found` 就是上游清单变了。** 两步查清：
+
+```powershell
+# 1) 上游实际有哪些（权威，带上下文长度）
+uv run python build_litellm_config.py --list-upstream
+
+# 2) 本代理对外暴露了哪些（客户端能填的名字以此为准）
+(Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
+```
+
+**用返回列表里的 id 作为模型名。** 把上游新出现的名字加进 `models.yaml` 后重新生成配置：
 
 ```powershell
 uv run python build_litellm_config.py
+# 然后 Ctrl+C 停掉代理，重跑 run.ps1
 ```
 
-查看上游当前可用的模型（模型可能下线）：
+### ⚠ Qwen 系列不能用在 Claude Code 里
 
-```powershell
-uv run python build_litellm_config.py --list-upstream
+Qwen 系（`Qwen3.8-27B`、`Qwen3.6-27B`、`/models/Qwen3.8-Flash-Next`、`1.Qwen3.5-27B`）
+**在 Claude Code 里必然 `400`**，与配置无关：
+
 ```
+400: System message must be at the beginning.
+```
+
+Claude Code 把 `Available agent types...` 以 `role: "system"` 消息塞进 `messages` 的**第 2 条**，
+而上游 vLLM 对 Qwen 系强制要求 system 消息在最前面（deepseek / GLM 系则宽容）。
+这是 Claude Code 的行为，代理层无法修正。**OpenAI 兼容客户端（OpenCode、SDK）用 Qwen 正常。**
 
 ## 常见问题
 
@@ -429,32 +453,58 @@ models:
   - GLM-5.3-Flash
 ```
 
-Currently available (measured 2026-09-13) — **largest context first**:
+Currently available (measured **2026-09-14**, 8 models) — **largest context first**.
+All eight are callable; the notes rank preference only — `not recommended` ≠ `unavailable`.
 
-| Model ID | Context |
-|---|---|
-| `deepseek-v41-flash` | **1M** ⭐ recommended main |
-| `GLM-5.3-Flash` | **1M** |
-| `deepseek-v4-flash` | **1M** |
-| `Qwen3.8-27B` | 256K |
-| `Qwen3.6-27B` | 256K |
-| `/models/Qwen3.8-Flash-Next` | 256K |
-| `GLM-5.3` | 128K |
-| `1.Qwen3.5-27B` | — ⚠ oldest, not recommended |
+> ⚠ **The upstream changes over time** (models are retired, added, or renamed). The table
+> above is a 2026-09-14 snapshot, not a permanent guarantee. Trust `--list-upstream` — see below.
+
+| Model ID | Context | Notes |
+|---|---|---|
+| `deepseek-v41-flash` | **1M** | ⭐ recommended main: newest generation, largest context |
+| `GLM-5.3-Flash` | **1M** | ⭐ recommended: fastest |
+| `deepseek-v4-flash` | **1M** | available |
+| `Qwen3.8-27B` | 256K | available (unusable from Claude Code — see below) |
+| `Qwen3.6-27B` | 256K | same |
+| `/models/Qwen3.8-Flash-Next` | 256K | same |
+| `GLM-5.3` | 128K | available but not recommended: only non-1M model, and slowest |
+| `1.Qwen3.5-27B` | — | least recommended: oldest (3.5 generation) |
 
 Recommended main: `deepseek-v41-flash` (1M context, newest generation).
 
-After editing, regenerate:
+### Listing the currently available models
+
+**`Model not found` means the upstream list changed.** Two queries tell you what is there:
+
+```powershell
+# 1) What the upstream actually offers (authoritative, includes context length)
+uv run python build_litellm_config.py --list-upstream
+
+# 2) What this proxy exposes (the names clients may use)
+(Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
+```
+
+**Use an `id` from the returned list as the model name.** Add any new upstream
+name to `models.yaml`, then regenerate and restart:
 
 ```powershell
 uv run python build_litellm_config.py
+# then Ctrl+C the proxy and re-run run.ps1
 ```
 
-List what the upstream currently offers:
+### ⚠ The Qwen family cannot be used from Claude Code
 
-```powershell
-uv run python build_litellm_config.py --list-upstream
+The Qwen models (`Qwen3.8-27B`, `Qwen3.6-27B`, `/models/Qwen3.8-Flash-Next`,
+`1.Qwen3.5-27B`) **always `400` under Claude Code**, regardless of configuration:
+
 ```
+400: System message must be at the beginning.
+```
+
+Claude Code puts its `Available agent types...` block in `messages` as a `role: "system"`
+message at **index 1**, while the upstream vLLM requires a system message to come first for
+Qwen models (deepseek/GLM tolerate it). This is Claude Code's behavior and cannot be fixed
+in the proxy. **OpenAI-compatible clients (OpenCode, SDK) use Qwen fine.**
 
 ## Troubleshooting
 
@@ -468,8 +518,10 @@ missing. Regenerate the config.
 endpoint, which ChatUJN does not expose (400). `hosted_vllm` is absent from that set and
 matches the real backend (vLLM).
 
-**`Model not found`** → the upstream model was retired. Run `--list-upstream` and update
-`models.yaml`.
+**`Model not found`** → the upstream list changed (model retired or renamed). Check what the
+upstream offers with `uv run python build_litellm_config.py --list-upstream`, and what this
+proxy exposes with `(Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id`, then update
+`models.yaml` and regenerate.
 
 **Startup crash `UnicodeDecodeError: 'gbk' codec`** → `litellm_config.yaml` contains
 non-ASCII characters. LiteLLM reads it with the system default codec; the generator
