@@ -1,0 +1,21 @@
+# 密钥与生成物 —— 绝不提交
+config.yaml
+litellm_config.yaml
+ujn_webvpn_state.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# 日志与调试
+*.log
+debug/
+proxy_requests.log
+proxy_stdout.log
+proxy_stderr.log
+
+# 编辑器
+.vscode/
+.idea/

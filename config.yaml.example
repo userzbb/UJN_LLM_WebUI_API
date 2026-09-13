@@ -1,0 +1,6 @@
+username: "your_student_or_staff_id"
+password: "your_webvpn_password"
+proxy:
+  api_key: "sk-your-ujn-api-key"
+  webvpn_api_base: "https://webvpn.ujn.edu.cn/https/77726476706e69737468656265737421f3ff40886925625e300d8db9d6562d/api"
+  webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"
