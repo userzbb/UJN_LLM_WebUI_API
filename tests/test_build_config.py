@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from build_litellm_config import build_target_url, render_config
@@ -23,21 +25,39 @@ def test_render_config_sets_both_bridge_flags():
     settings = {"api_base": "https://vpn.example.edu/api",
                 "host_query": "host.q", "api_key": "sk-test"}
     models = [{"upstream": "GLM-5.3", "aliases": ["GLM-5.3", "claude-opus-4-1"]}]
-    out = render_config(settings, "a=b; c=d", models)
+    config = yaml.safe_load(render_config(settings, "a=b; c=d", models))
 
-    assert "use_chat_completions_url_for_anthropic_messages: true" in out
-    assert "use_chat_completions_api: true" in out
+    assert config["litellm_settings"]["use_chat_completions_url_for_anthropic_messages"] is True
+    for entry in config["model_list"]:
+        assert entry["litellm_params"]["use_chat_completions_api"] is True
 
 
 def test_render_config_injects_cookie_and_browser_headers():
     settings = {"api_base": "https://vpn.example.edu/api",
                 "host_query": "host.q", "api_key": "sk-test"}
     models = [{"upstream": "GLM-5.3", "aliases": ["GLM-5.3"]}]
-    out = render_config(settings, "wengine_vpn_ticket=SECRET", models)
+    config = yaml.safe_load(render_config(settings, "wengine_vpn_ticket=SECRET", models))
+    headers = config["model_list"][0]["litellm_params"]["extra_headers"]
 
-    assert 'Cookie: "wengine_vpn_ticket=SECRET"' in out
-    assert 'Origin: "https://webvpn.ujn.edu.cn"' in out
-    assert "Mozilla/5.0" in out
+    assert headers["Cookie"] == "wengine_vpn_ticket=SECRET"
+    assert headers["Origin"] == "https://webvpn.ujn.edu.cn"
+    assert "Mozilla/5.0" in headers["User-Agent"]
+
+
+def test_render_config_survives_quotes_in_header_values():
+    """回归：Cookie / api_key 的取值来自服务端，可能含 `"`。
+
+    手工拼接字符串会产出非法 YAML，导致 LiteLLM 启动时解析失败；
+    改用 yaml.safe_dump 后必须能正确转义并原样取回。
+    """
+    settings = {"api_base": "https://vpn.example.edu/api",
+                "host_query": "host.q", "api_key": 'sk-with"quote'}
+    models = [{"upstream": "GLM-5.3", "aliases": ["GLM-5.3"]}]
+    config = yaml.safe_load(render_config(settings, 'k=va"lue', models))
+    params = config["model_list"][0]["litellm_params"]
+
+    assert params["api_key"] == 'sk-with"quote'
+    assert params["extra_headers"]["Cookie"] == 'k=va"lue'
 
 
 def test_render_config_is_pure_ascii():
@@ -55,7 +75,18 @@ def test_render_config_emits_one_entry_per_alias():
     settings = {"api_base": "https://vpn.example.edu/api",
                 "host_query": "host.q", "api_key": "sk-test"}
     models = [{"upstream": "GLM-5.3", "aliases": ["GLM-5.3", "claude-opus-4-1"]}]
+    config = yaml.safe_load(render_config(settings, "a=b", models))
+
+    names = [e["model_name"] for e in config["model_list"]]
+    assert names == ["GLM-5.3", "claude-opus-4-1"]
+
+
+def test_render_config_unicode_false_when_ascii():
+    """allow_unicode=False 保证输出纯 ASCII（配合上面的 GBK 约束）。"""
+    settings = {"api_base": "https://vpn.example.edu/api",
+                "host_query": "host.q", "api_key": "sk-test"}
+    models = [{"upstream": "/models/Qwen3.8-Flash-Next", "aliases": ["/models/Qwen3.8-Flash-Next"]}]
     out = render_config(settings, "a=b", models)
 
-    assert out.count("model_name: GLM-5.3") == 1
-    assert out.count("model_name: claude-opus-4-1") == 1
+    assert "Qwen3.8-Flash-Next" in out
+    assert not [c for c in out if ord(c) > 127]

@@ -105,48 +105,54 @@ def build_target_url(api_base: str, host_query: str) -> str:
 
 
 def render_config(settings: dict[str, str], cookie_header: str, models: list[dict]) -> str:
-    """生成 LiteLLM 配置文本。纯函数，不联网、不读文件。"""
+    """生成 LiteLLM 配置文本。纯函数，不联网、不读文件。
+
+    用 yaml.safe_dump 而不是手工拼字符串：Cookie / api_key 的取值来自服务端，
+    可能包含 `"` 等字符；手工插值会产出非法 YAML，导致 LiteLLM 启动时解析失败。
+    """
     url = build_target_url(settings["api_base"], settings["host_query"])
 
     headers = dict(BROWSER_HEADERS)
     headers["Cookie"] = cookie_header
 
-    lines: list[str] = ["model_list:"]
+    model_list: list[dict] = []
     for entry in models:
         upstream = entry.get("upstream")
         if not upstream:
             continue
         for alias in entry.get("aliases") or []:
-            lines += [
-                f"  - model_name: {alias}",
-                "    litellm_params:",
-                f"      model: openai/{upstream}",
-                f"      api_base: {url}",
-                f"      api_key: {settings['api_key']}",
-                # 开关 1：强制把 /v1/responses 桥接到上游的 chat/completions。
-                # 不加这条，Codex 的请求会把 input 直接发给上游 -> KeyError 'messages'。
-                "      use_chat_completions_api: true",
-                "      extra_headers:",
-            ]
-            for key, value in headers.items():
-                lines.append(f'        {key}: "{value}"')
-            lines.append("")
+            model_list.append(
+                {
+                    "model_name": alias,
+                    "litellm_params": {
+                        "model": f"openai/{upstream}",
+                        "api_base": url,
+                        "api_key": settings["api_key"],
+                        # 开关 1：强制把 /v1/responses 桥接到上游的 chat/completions。
+                        # 不加这条，Codex 的请求会把 input 直接发给上游 -> KeyError 'messages'。
+                        "use_chat_completions_api": True,
+                        "extra_headers": dict(headers),
+                    },
+                }
+            )
 
-    lines += [
-        "litellm_settings:",
-        "  drop_params: true",
-        # 开关 2：强制 /v1/messages 走 chat/completions 而非 Responses 适配器。
-        # 不加这条，Claude Code 的请求会 KeyError 'created_at'。
-        "  use_chat_completions_url_for_anthropic_messages: true",
-        "  merge_reasoning_content_in_choices: true",
-        "",
-        "general_settings:",
-        "  # Local-only proxy. The real UJN API key is injected above.",
-        "  disable_auth: true",
-        "  master_key: null",
-        "",
-    ]
-    return "\n".join(lines)
+    config = {
+        "model_list": model_list,
+        "litellm_settings": {
+            "drop_params": True,
+            # 开关 2：强制 /v1/messages 走 chat/completions 而非 Responses 适配器。
+            # 不加这条，Claude Code 的请求会 KeyError 'created_at'。
+            "use_chat_completions_url_for_anthropic_messages": True,
+            "merge_reasoning_content_in_choices": True,
+        },
+        "general_settings": {
+            # Local-only proxy. The real UJN API key is injected above.
+            "disable_auth": True,
+            "master_key": None,
+        },
+    }
+
+    return yaml.safe_dump(config, allow_unicode=False, sort_keys=False, default_flow_style=False)
 
 
 def list_upstream_models(settings: dict[str, str], cookie_header: str) -> None:
