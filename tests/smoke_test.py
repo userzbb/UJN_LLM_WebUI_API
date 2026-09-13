@@ -8,8 +8,13 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from ujn_console import enable_utf8_stdout
 
 TOOLS = [
     {"name": "get_weather", "description": "Get weather for a city.",
@@ -29,8 +34,7 @@ def check(label: str, ok: bool, detail: str = "") -> bool:
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    enable_utf8_stdout()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:4000")

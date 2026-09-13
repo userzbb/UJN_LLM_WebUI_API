@@ -10,10 +10,11 @@ LiteLLM 负责全部协议转换（OpenAI / Anthropic / Responses）与工具调
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 import yaml
+
+from ujn_console import enable_utf8_stdout
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
@@ -165,8 +166,7 @@ def list_upstream_models(settings: dict[str, str], cookie_header: str) -> None:
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    enable_utf8_stdout()
 
     parser = argparse.ArgumentParser(description="生成 LiteLLM 配置（注入 WebVPN Cookie）。")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
