@@ -101,9 +101,13 @@ def load_proxy_settings(config_file: Path = CONFIG_FILE) -> dict[str, str]:
     api_key = read_yaml_scalar(text, "api_key")
 
     if not api_base:
-        raise SystemExit("config.yaml 缺少 proxy.webvpn_api_base")
+        raise SystemExit("config.yaml 缺少 webvpn_api_base")
     if not api_key:
-        raise SystemExit("config.yaml 缺少 proxy.api_key")
+        # 别写成 proxy.api_key：read_yaml_scalar 嵌套任意深度都能找到，
+        # 键放在顶层同样有效，报错信息不该限定位置。
+        raise SystemExit(
+            "config.yaml 缺少 api_key（应填 ChatUJN 的 JWT 令牌，不带 Bearer 前缀）"
+        )
 
     # 允许 webvpn_api_base 里留 <opaque> 占位符：路径段是可推导的，
     # 直接用 host_query 里的主机名算出来，省得用户去浏览器 F12 里抄。

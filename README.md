@@ -10,8 +10,9 @@
 
 ## 这是什么
 
-ChatUJN 只能通过校园 WebVPN 访问，且**必须同时携带 WebVPN Cookie 和 API Key**——
-只给 API Key 会被重定向到登录页（实测 `302`）。而它本身只会说 **OpenAI Chat Completions**
+ChatUJN 只能通过校园 WebVPN 访问，且**必须同时携带 WebVPN Cookie 和 JWT 令牌**——
+两者缺一不可（实测：只给 Cookie 报 `403 Not authenticated`，只给 JWT 被重定向到登录页 `302`）。
+而它本身只会说 **OpenAI Chat Completions**
 一种协议，Claude Code（Anthropic Messages）和 Codex（Responses API）都听不懂。
 
 本项目用一个 **LiteLLM 代理**做协议转换，把三种协议统一到本机 `http://127.0.0.1:4000`。
@@ -26,7 +27,7 @@ OpenAI SDK    ──OpenAI /v1/chat/...─────┘         │
                                                   ↓
                                     LiteLLM Proxy（协议转换 + 工具调用）
                                                   │
-                                    WebVPN Cookie + UJN API Key
+                                    WebVPN Cookie + JWT 令牌
                                                   ↓
                                     ChatUJN（Open WebUI v0.5.16 + vLLM）
 ```
@@ -63,7 +64,7 @@ Copy-Item config.yaml.example config.yaml
 username: "your_student_or_staff_id"    # WebVPN 账号
 password: "your_webvpn_password"        # WebVPN 密码
 proxy:
-  api_key: "sk-your-ujn-api-key"        # ChatUJN 的 API Key
+  api_key: "eyJhbGciOi..."              # ChatUJN 的 JWT 令牌，见下节
   webvpn_api_base: "https://webvpn.ujn.edu.cn/https/<opaque>/api"
   webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"
 ```
@@ -73,6 +74,26 @@ proxy:
 - `config.yaml` 已被 `.gitignore` 排除，**不要提交或分享**。
 - `webvpn_api_base` 到 `/api` 结束，不含 `/chat/completions`。
 - `webvpn_host_query` 是 URL 问号后面的部分，不含 `?`。
+
+### `api_key` 填的是 JWT 令牌，不是 `sk-` 开头的 Key
+
+上游现在只认 **JWT 令牌**（形如 `eyJhbGciOiJIUzI1NiIs...`，三段以 `.` 分隔）。
+旧文档里写的 `sk-your-ujn-api-key` 是占位符，**早已不适用** —— 填上去会 `401`。
+
+获取方式：登录 ChatUJN 后按 F12 → Network → 任意一个 `POST /api/chat/completions` 请求，
+复制请求头里的 `Authorization: Bearer eyJ...`，**去掉 `Bearer ` 前缀**，只把 JWT 本身填进
+`api_key`（代理转发时会自动补上 `Authorization: Bearer <api_key>`）。
+
+> 🔍 **怎么确认填对了：** 该 JWT 的载荷只含一个用户 UUID，且**没有 `exp` 字段**
+> ——也就是说它本身不会过期，失效只发生在你主动登出或上游清理会话时。
+
+> ⚠ **不要把 JWT 或 Cookie 发给任何人。** 它的签名部分足以冒充你调用上游接口。
+> 一旦泄露，去 ChatUJN 登出重登即可作废。
+
+其实**不用手工抄**：`ujn_webvpn_login.py` 已经负责维持整个登录会话，
+`run.ps1` 每次重新登录后会重新生成 `litellm_config.yaml`。上面这条只在你
+想手工核对时用得上。唯一例外是**首次配置** —— 先按上面取一个填进 `config.yaml`，
+让 `config.yaml` 自己也有一份可用的兜底值。
 
 ### `<opaque>` 那一段不用手抄 —— 会自动填
 
@@ -115,7 +136,7 @@ https://webvpn.ujn.edu.cn/https/<opaque>/api/chat/completions?vpn-12-o2-chat.ujn
 
 拆成配置：`.../api` 为 `webvpn_api_base`，`?` 之后为 `webvpn_host_query`。
 
-> ⚠ 不要把浏览器里的 `Authorization`、`Cookie` 或 API Key 截图发人。
+> ⚠ 不要把浏览器里的 `Authorization`、`Cookie` 或 JWT 令牌截图发人。
 
 ## 一键启动
 
@@ -360,6 +381,18 @@ litellm_params:
 ```powershell
 uv run python ujn_webvpn_login.py --headless
 .\run.ps1
+```
+
+**`401 Unauthorized`**
+→ JWT 令牌被拒（通常是登出过、或上游清理了会话）。`run.ps1` 会按需重新登录并重启；
+手工排查时按上文「`api_key` 填的是 JWT 令牌」重新取一个填进 `config.yaml`。
+
+**`403 Not authenticated`**
+→ 请求没带 Cookie（只有 JWT 是不够的）。确认 `ujn_webvpn_state.json` 里
+有 `wengine_vpn_ticketwebvpn_ujn_edu_cn`，并重新生成配置：
+
+```powershell
+uv run python build_litellm_config.py
 ```
 
 **Claude Code 报连接错误**
