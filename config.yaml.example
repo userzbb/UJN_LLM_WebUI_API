@@ -1,11 +1,16 @@
 username: "your_student_or_staff_id"
 password: "your_webvpn_password"
 proxy:
-  # ChatUJN 的 JWT 令牌（形如 eyJhbGciOi...，不是 sk- 开头的 Key）。
-  # 取法：登录 ChatUJN → F12 → Network → 任一 POST /api/chat/completions
-  #       → 复制请求头 Authorization: Bearer eyJ...，去掉 "Bearer " 前缀。
-  # 代理转发时会自动补上 Bearer，所以这里【不要】带前缀。
-  api_key: "eyJhbGciOi...粘贴完整的 JWT..."
+  # 【兜底凭据，建议填一份】ujn_webvpn_login.py 登录后会自动提取 JWT 写进
+  # ujn_webvpn_state.json，生成脚本优先用 state 里那一份，正常情况下这个值用不到。
+  # 但没跑过登录脚本、或 state 文件被删/提取失败时，就靠它顶上。
+  # 两者都有且不同时，脚本会告警说明实际用的是哪一份（state 优先）。
+  #
+  # 填法：它是 JWT 令牌（形如 eyJhbGciOi...，不是 sk- 开头的 Key）。
+  # 在 chat.ujn.edu.cn 的 Console 里执行 document.cookie，取 `token=` 后面那段。
+  # 注意它在 cookie 里，不在 localStorage —— 代理转发时会自动补 Bearer 前缀，
+  # 所以这里【不要】带 "Bearer " 前缀。
+  api_key: "eyJhbGciOi...填一份 JWT 作为兜底..."
   # 这一段不用手填：它是主机名的编码（公开常量 wrdvpnisthebest! + AES-CTR），
   # 不是密钥。脚本会用下面的 webvpn_host_query 自动算出来。
   # 想单独查看：uv run python build_litellm_config.py --webvpn-path chat.ujn.edu.cn

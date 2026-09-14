@@ -11,8 +11,31 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 
 # 本地直连，避免系统代理接管 127.0.0.1
-$env:NO_PROXY = "localhost,127.0.0.1"
-$env:no_proxy = "localhost,127.0.0.1"
+#
+# 关键：必须把 .ujn.edu.cn 也加进去。若 profile 里设了 HTTP_PROXY/HTTPS_PROXY
+# （FlClash 等），LiteLLM 会继承它并把【所有】上游请求发给那个代理；
+# 代理软件一关就变成死地址，上游全部 500。实测：
+#   NO_PROXY=localhost,127.0.0.1                  -> 死代理时 HTTP 500
+#   NO_PROXY=localhost,127.0.0.1,.ujn.edu.cn      -> 死代理时 HTTP 200
+# webvpn 是 202.194.65.6（国内教育网），实测直连 0.2s，不需要代理。
+#
+# 用赋值会盖掉用户 profile 里已有的 NO_PROXY，所以先并入既有值再写回。
+#
+# 注意：Windows 环境变量【不区分大小写】，$env:NO_PROXY 与 $env:no_proxy 是同一个变量。
+# 别写成 foreach (@($env:NO_PROXY, $env:no_proxy)) —— 第二个元素是同值，
+# 看起来是"合并两个来源"，实际只是把同一个值读了两遍。
+$parts = @("localhost", "127.0.0.1", ".ujn.edu.cn")
+foreach ($existing in @($env:NO_PROXY)) {
+    if ($existing) {
+        foreach ($item in ($existing -split ",")) {
+            $trimmed = $item.Trim()
+            if ($trimmed -and ($parts -notcontains $trimmed)) { $parts += $trimmed }
+        }
+    }
+}
+$noProxyValue = $parts -join ","
+$env:NO_PROXY = $noProxyValue
+$env:no_proxy = $noProxyValue
 $env:PYTHONIOENCODING = "utf-8"
 
 $script:ProxyProcess = $null
@@ -88,11 +111,14 @@ function Test-ProxyUpstream {
     <#
       探测运行中的代理能否真的打到上游。返回值：
         ok      正常
-        dead    连不上/超时 —— 代理进程挂了
+        dead    连不上/超时 —— 代理进程挂了或网络不通（无状态码）
         session 401/403/502/503 —— WebVPN 会话失效，要换新 Cookie 并重启
         config  400 —— 多半是探测用的模型名有问题，重启无用
         unknown 其它
-      只有 dead / session 触发重启，避免因配置类问题陷入重启风暴。
+
+      dead / session 都会触发重启（代理进程本身可能是坏的），
+      但【只有 session 会重新登录换凭据】—— 见守护循环里的说明。
+      配置类问题（config）不重启，避免陷入重启风暴。
     #>
     param([string] $Model, [int] $TimeoutSec = 45)
 
@@ -305,8 +331,10 @@ Start-Proxy
 if (-not (Wait-ProxyUp)) { throw "代理启动超时（$Port 没起来）" }
 Write-Stamp "代理已就绪: http://127.0.0.1:$Port"
 Write-Host ""
-Write-Host "守护中：每 ${ProbeSeconds}s 探测一次，打不通上游才换 Cookie 重启；"
-Write-Host "        每 ${RefreshSeconds}s 主动刷新一次 Cookie。Ctrl+C 退出。"
+Write-Host "守护中：每 ${ProbeSeconds}s 探测一次；"
+Write-Host "        只有上游返回 401/403/502/503 才重新登录换凭据，"
+Write-Host "        网络不通只重启进程（不重新登录）；"
+Write-Host "        每 ${RefreshSeconds}s 主动刷新一次 Cookie 与 JWT。Ctrl+C 退出。"
 Write-Host ""
 
 # ---------------------------------------------------------------- 守护循环
@@ -320,9 +348,10 @@ try {
 
         # 周期性主动刷新：只更新磁盘上的配置，不打断正在跑的请求。
         # 真正加载新 Cookie 要等下一次按需重启。
+        # 登录脚本顺带会把 JWT 也重新掏一份写进 state 文件。
         if ($sinceRefresh -ge $RefreshSeconds) {
             $sinceRefresh = 0
-            Write-Stamp "定期刷新 Cookie..."
+            Write-Stamp "定期刷新 Cookie 与 JWT..."
             if (Invoke-WebVpnLogin -MaxAttempts $MaxLoginAttempts) {
                 if (Update-LiteLlmConfig) {
                     Write-Stamp "  已更新 litellm_config.yaml（下次重启生效）"
@@ -348,8 +377,12 @@ try {
                 # 正常，什么都不做 —— 这就是「按需重启」：平时零中断。
             }
             "dead" {
-                Write-Warning "代理无响应，重启中..."
-                if (Restart-Proxy -FreshCookie $true) { $script:BackoffSeconds = 0 }
+                # 连不上/超时 = 代理进程挂了，与会话有效性无关。
+                # 【不要】在这里重新登录：网络抖一下就跑一次浏览器登录既慢又没用，
+                # 而且登录本身要联网，抖动期间大概率也失败，白白触发退避。
+                # 只有 confirmed 401/403 的 "session" 才换凭据（见下）。
+                Write-Warning "代理无响应（网络/进程），仅重启进程，不重新登录..."
+                if (Restart-Proxy -FreshCookie $false) { $script:BackoffSeconds = 0 }
             }
             "session" {
                 Write-Warning "WebVPN 会话失效，换新 Cookie 并重启..."

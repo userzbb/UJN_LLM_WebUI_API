@@ -64,7 +64,7 @@ Copy-Item config.yaml.example config.yaml
 username: "your_student_or_staff_id"    # WebVPN 账号
 password: "your_webvpn_password"        # WebVPN 密码
 proxy:
-  api_key: "eyJhbGciOi..."              # ChatUJN 的 JWT 令牌，见下节
+  api_key: "eyJhbGciOi..."              # 兜底 JWT，见下节（正常由脚本自动提取）
   webvpn_api_base: "https://webvpn.ujn.edu.cn/https/<opaque>/api"
   webvpn_host_query: "vpn-12-o2-chat.ujn.edu.cn"
 ```
@@ -74,26 +74,43 @@ proxy:
 - `config.yaml` 已被 `.gitignore` 排除，**不要提交或分享**。
 - `webvpn_api_base` 到 `/api` 结束，不含 `/chat/completions`。
 - `webvpn_host_query` 是 URL 问号后面的部分，不含 `?`。
+  **它是 JWT 自动提取必需的** —— 缺了它脚本算不出应用页 URL，会跳过提取并告警。
 
-### `api_key` 填的是 JWT 令牌，不是 `sk-` 开头的 Key
+### JWT 会自动提取，不用手抄
 
-上游现在只认 **JWT 令牌**（形如 `eyJhbGciOiJIUzI1NiIs...`，三段以 `.` 分隔）。
+上游只认 **JWT 令牌**（形如 `eyJhbGciOiJIUzI1NiIs...`，三段以 `.` 分隔）。
 旧文档里写的 `sk-your-ujn-api-key` 是占位符，**早已不适用** —— 填上去会 `401`。
 
-获取方式：登录 ChatUJN 后按 F12 → Network → 任意一个 `POST /api/chat/completions` 请求，
-复制请求头里的 `Authorization: Bearer eyJ...`，**去掉 `Bearer ` 前缀**，只把 JWT 本身填进
-`api_key`（代理转发时会自动补上 `Authorization: Bearer <api_key>`）。
+`ujn_webvpn_login.py` 登录成功后会顺路走到 chat 应用页，把 JWT 掏出来写进
+`ujn_webvpn_state.json` 的顶层 `jwt` 字段；`build_litellm_config.py` 优先用 state 里
+那一份，`config.yaml` 的 `api_key` 只是兜底。整条链路是自动的：
+
+```
+ujn_webvpn_login.py  ->  state.json { cookies, jwt }  ->  build_litellm_config.py  ->  litellm_config.yaml
+```
+
+**凭据优先级**：`state.jwt` > `config.yaml` 的 `api_key`。
+两者都有且不同时脚本会在 stderr 告警，告诉你实际用的是哪一份。
+
+**`config.yaml` 的 `api_key` 建议填一份作为兜底**（而不是留空）：正常情况下
+自动提取的 JWT 会被优先使用，这个值用不到；但没跑过登录脚本、state 文件被删、
+或提取失败时，就靠它顶上。
 
 > 🔍 **怎么确认填对了：** 该 JWT 的载荷只含一个用户 UUID，且**没有 `exp` 字段**
 > ——也就是说它本身不会过期，失效只发生在你主动登出或上游清理会话时。
+> 也正因如此，提取失败时脚本**沿用**上一次的 JWT 而不是抹掉，避免误退到旧凭据。
 
 > ⚠ **不要把 JWT 或 Cookie 发给任何人。** 它的签名部分足以冒充你调用上游接口。
 > 一旦泄露，去 ChatUJN 登出重登即可作废。
 
-其实**不用手工抄**：`ujn_webvpn_login.py` 已经负责维持整个登录会话，
-`run.ps1` 每次重新登录后会重新生成 `litellm_config.yaml`。上面这条只在你
-想手工核对时用得上。唯一例外是**首次配置** —— 先按上面取一个填进 `config.yaml`，
-让 `config.yaml` 自己也有一份可用的兜底值。
+手工提取（仅在自动路径失效、需要核对时）：登录 ChatUJN 后按 F12 → Console 里执行
+`document.cookie`，复制 `token=` 后面的值填进 `api_key`。
+
+> 📌 **JWT 在哪：** 它在名为 `token` 的 **cookie** 里，**不在 localStorage**。
+> 用浏览器控制台 dump `localStorage` 会看到一堆 `__2___3___2..._token` 的混淆键，
+> 那是前端把 cookie 复制过去的副本，不是源头 —— 照它去找会永远找不到。
+> 附带一个坑：它是 JS 设的 session cookie，**不进 Playwright 的 cookie jar**，
+> 所以 `context.storage_state()` 里没有它，只能读 `document.cookie`。
 
 ### `<opaque>` 那一段不用手抄 —— 会自动填
 
@@ -153,9 +170,21 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 `run.ps1` 会：
 
 1. 先做一次 headless WebVPN 登录刷新（最多 3 次）。
-2. 读 Cookie 生成 `litellm_config.yaml`。
-3. 启动后台定时任务，每 30 分钟刷新登录态并重新生成配置。
+2. 读 Cookie 与 JWT 生成 `litellm_config.yaml`。
+3. 启动后台定时任务，每 30 分钟刷新登录态（Cookie + JWT）并重新生成配置。
 4. 前台启动 LiteLLM 代理（`http://127.0.0.1:4000`）。
+
+**守护策略**：每 60s 探测一次上游，按结果决定动作 ——
+
+| 探测结果 | 动作 |
+|---|---|
+| 正常 | 什么都不做（零中断） |
+| `401` / `403` / `502` / `503` | WebVPN 会话失效 → 重新登录换凭据并重启 |
+| 连不上 / 超时 | 只重启代理进程，**不重新登录** |
+| `400` | 多半是模型名问题 → 不重启，只告警 |
+
+> 关键在于第三行：网络抖动不该触发一次浏览器登录。登录本身要联网，
+> 抖动期间大概率也失败，只会白白拖慢恢复。
 
 > ⚠ **LiteLLM 只在启动时读取一次 `litellm_config.yaml`。** 后台刷新了 Cookie 后，
 > 需要**重启 `run.ps1`** 才会生效。这是实测结论：运行中修改文件里的 Cookie，
@@ -254,12 +283,18 @@ setx UJN_DUMMY_KEY "dummy"
 
 ### 本地直连
 
-若开了系统代理或梯子，让本地地址直连：
+（`run.ps1` 会自动设置这一节的内容，手工启动 LiteLLM 时才需要自己来。）
+
+若开了系统代理或梯子，必须让**本地地址和校园网地址**都直连：
 
 ```powershell
-$env:NO_PROXY = "localhost,127.0.0.1"
-$env:no_proxy = "localhost,127.0.0.1"
+$env:NO_PROXY = "localhost,127.0.0.1,.ujn.edu.cn"
+$env:no_proxy = "localhost,127.0.0.1,.ujn.edu.cn"
 ```
+
+> ⚠ **`.ujn.edu.cn` 不能漏。** 只写 `localhost,127.0.0.1` 时，LiteLLM 会把上游请求
+> 发给你的代理软件；代理一关就变成死地址，上游全部 `500`（开着代理才正常）。
+> 而 webvpn 是国内教育网地址，实测直连 0.2s，本来就不需要代理。
 
 ## 模型列表
 
@@ -385,7 +420,36 @@ uv run python ujn_webvpn_login.py --headless
 
 **`401 Unauthorized`**
 → JWT 令牌被拒（通常是登出过、或上游清理了会话）。`run.ps1` 会按需重新登录并重启；
-手工排查时按上文「`api_key` 填的是 JWT 令牌」重新取一个填进 `config.yaml`。
+手工排查时重跑一次登录脚本刷新 JWT：
+
+```powershell
+uv run python ujn_webvpn_login.py --headless
+uv run python build_litellm_config.py
+```
+
+若登录脚本报「未提取到 JWT」，见下一条。
+
+**登录后报「未提取到 JWT」**
+→ 应用页没能提供 JWT。按顺序查：
+
+1. `config.yaml` 里有没有 `webvpn_host_query`（缺了它算不出应用页 URL）；
+2. 账号在 ChatUJN 侧是否有权限（能手工登录 chat.ujn.edu.cn 吗）；
+3. 上游是否改了 token 的存放方式 —— 在浏览器 Console 里执行
+   `document.cookie`，看还有没有 `token=` 开头的那一段。
+
+注意这个告警**不影响 Cookie 刷新**，登录本身仍是成功的（退出码 0）。
+此时脚本会沿用上一次保存的 JWT。
+
+**一关掉代理软件就 `500`（开着才正常）**
+→ 你的 PowerShell profile 里设了 `HTTP_PROXY` / `HTTPS_PROXY`（FlClash 等常见），
+`run.ps1` 继承它，LiteLLM 子进程再把**所有**上游请求发给那个代理。
+代理软件一关，端口变成死地址 → 上游全部 500。
+
+`webvpn.ujn.edu.cn` 解析到 `202.194.65.6`（国内教育网），实测直连 TLSv1.3 仅 0.2s，
+**不需要代理**。`run.ps1` 已自动把 `.ujn.edu.cn` 并入 `NO_PROXY`，无需手工处理。
+
+若你的代理软件跑在 TUN/全局模式，它可能无视 `NO_PROXY` 直接劫持流量 ——
+那种情况请在代理软件里为 `*.ujn.edu.cn` 配一条直连规则。
 
 **`403 Not authenticated`**
 → 请求没带 Cookie（只有 JWT 是不够的）。确认 `ujn_webvpn_state.json` 里

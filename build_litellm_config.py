@@ -9,13 +9,24 @@ LiteLLM 负责全部协议转换（OpenAI / Anthropic / Responses）与工具调
 
 import argparse
 import json
-import re
+import sys
 from datetime import date
 from pathlib import Path
 
 import yaml
 
 from ujn_console import enable_utf8_stdout
+
+# 路径段推导 / 主机名解析 / WebVPN 源站常量与登录脚本共用，放在 ujn_webvpn。
+# 这里原名转出：WRD_CONSTANT 与 webvpn_path_segment 是本模块原有的公开名字，
+# 外部（含既有测试）可能从 build_litellm_config 直接 import，不能因为搬家就断了。
+from ujn_webvpn import (
+    WEBVPN_ORIGIN,
+    WRD_CONSTANT,
+    extract_host_from_query,
+    read_state_jwt,
+    webvpn_path_segment,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / "config.yaml"
@@ -25,7 +36,6 @@ DEFAULT_OUT = BASE_DIR / "litellm_config.yaml"
 CLIENTS_DIR = BASE_DIR / "clients"
 DEFAULT_PORT = 4000
 
-WEBVPN_ORIGIN = "https://webvpn.ujn.edu.cn"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -40,28 +50,19 @@ BROWSER_HEADERS = {
     "User-Agent": USER_AGENT,
 }
 
-# WebVPN 路径段的编码常量 —— 公开值，所有 wrdvpn 部署通用。
-# 路径段 = "wrdvpnisthebest!" + AES-CTR(主机名, key=iv=该常量)。
-# 即：它【只是主机名的编码】，不是凭据 —— 同一所学校所有用户的值都一样，
-# 且单独拿到它而没有有效会话 Cookie 时，只会被弹回登录页。
-WRD_CONSTANT = b"wrdvpnisthebest!"
-
-# host_query 形如 vpn-12-o2-chat.ujn.edu.cn，真实主机名在 vpn-<端口>-o<1|2>- 之后。
-_VPN_PREFIX_RE = re.compile(r"^vpn-\d+-o[12]-")
-
-
-def webvpn_path_segment(host: str) -> str:
-    """由主机名推导 WebVPN 的 /https/<段>/ 路径段（纯函数，不联网）。"""
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-    encryptor = Cipher(algorithms.AES(WRD_CONSTANT), modes.CTR(WRD_CONSTANT)).encryptor()
-    ciphertext = encryptor.update(host.encode("utf-8")) + encryptor.finalize()
-    return (WRD_CONSTANT + ciphertext).hex()
-
-
-def extract_host_from_query(host_query: str) -> str:
-    """从 host_query 里取出真实主机名（去掉 vpn-<端口>-o<1|2>- 前缀）。"""
-    return _VPN_PREFIX_RE.sub("", host_query.strip(), count=1)
+# 必须让 LiteLLM 绕过系统代理，否则关掉代理软件就 500。
+#
+# 实测根因（2026-09-14）：run.ps1 跑在 PowerShell 里，若 profile 设了
+#   $env:HTTP_PROXY / $env:HTTPS_PROXY（FlClash 等工具很常见），
+# LiteLLM 子进程会继承它们，把【所有】上游请求发给那个代理。
+# 代理软件一关，7897 变成死地址，LiteLLM 仍往那儿发 -> 上游全部 500。
+#
+# 而 webvpn.ujn.edu.cn 解析到 202.194.65.6（国内教育网），实测直连 TLSv1.3 仅 0.2s，
+# 根本不需要代理 —— 代理纯属多余，且是故障源。
+#
+# 用后缀 .ujn.edu.cn 而不是单个主机名：将来换 chat 之外的子系统也不必再改。
+# 保持 localhost/127.0.0.1：LiteLLM 自己也要连本机。
+NO_PROXY_VALUE = "localhost,127.0.0.1,.ujn.edu.cn"
 
 
 def read_yaml_scalar(text: str, key: str) -> str | None:
@@ -91,23 +92,61 @@ def read_yaml_scalar(text: str, key: str) -> str | None:
     return None if found is None else str(found)
 
 
-def load_proxy_settings(config_file: Path = CONFIG_FILE) -> dict[str, str]:
+def load_api_key(text: str, state_file: Path | None = None) -> str:
+    """取上游 API Key（ChatUJN 的 JWT）。
+
+    优先级：state 文件里的 jwt > config.yaml 的 api_key。
+
+    state 优先的原因：ujn_webvpn_login.py 每次登录都会重新掏一份 JWT 写进 state，
+    这条链路是自动的；config.yaml 里的 api_key 是手工抄的、会过期。
+    反过来让 config.yaml 优先，等于手工值永远压着自动值，自动化形同虚设。
+
+    config.yaml 的 api_key 仍然保留 —— 它是「没跑过登录脚本 / state 被删了」时的兜底。
+
+    两者都存在且不同时告警：用户可能刚换过 JWT，需要知道实际用的是哪一份。
+
+    state_file 默认 None 表示「运行时取模块常量 STATE_FILE」。
+    不能写成 `state_file: Path = STATE_FILE` —— 默认参数在函数定义时求值，
+    之后改 STATE_FILE 常量对它无效，测试没法替换路径。
+    """
+    if state_file is None:
+        state_file = STATE_FILE
+
+    from_state = read_state_jwt(state_file)
+    from_config = read_yaml_scalar(text, "api_key")
+
+    if from_state and from_config and from_state != from_config:
+        print(
+            "提示：state 文件里的 JWT 与 config.yaml 的 api_key 不一致，"
+            "本次使用 state 里的（ujn_webvpn_login.py 自动提取）。\n"
+            "      若想改用 config.yaml 那份，请删掉 state 文件里的 jwt 字段，"
+            "或重跑登录脚本。",
+            file=sys.stderr,
+        )
+
+    api_key = from_state or from_config
+    if not api_key:
+        raise SystemExit(
+            "没有可用的 API Key。请先运行 ujn_webvpn_login.py 自动提取 JWT，\n"
+            "或在 config.yaml 里填 api_key（ChatUJN 的 JWT 令牌，不带 Bearer 前缀）。"
+        )
+    return api_key
+
+
+def load_proxy_settings(
+    config_file: Path = CONFIG_FILE, state_file: Path | None = None
+) -> dict[str, str]:
     if not config_file.exists():
         raise SystemExit(f"{config_file.name} 不存在，请先复制 config.yaml.example")
     text = config_file.read_text(encoding="utf-8")
 
     api_base = read_yaml_scalar(text, "webvpn_api_base")
     host_query = read_yaml_scalar(text, "webvpn_host_query")
-    api_key = read_yaml_scalar(text, "api_key")
 
     if not api_base:
         raise SystemExit("config.yaml 缺少 webvpn_api_base")
-    if not api_key:
-        # 别写成 proxy.api_key：read_yaml_scalar 嵌套任意深度都能找到，
-        # 键放在顶层同样有效，报错信息不该限定位置。
-        raise SystemExit(
-            "config.yaml 缺少 api_key（应填 ChatUJN 的 JWT 令牌，不带 Bearer 前缀）"
-        )
+
+    api_key = load_api_key(text, state_file=state_file)
 
     # 允许 webvpn_api_base 里留 <opaque> 占位符：路径段是可推导的，
     # 直接用 host_query 里的主机名算出来，省得用户去浏览器 F12 里抄。
@@ -127,7 +166,11 @@ def load_proxy_settings(config_file: Path = CONFIG_FILE) -> dict[str, str]:
     }
 
 
-def load_cookie_header(state_file: Path = STATE_FILE) -> str:
+def load_cookie_header(state_file: Path | None = None) -> str:
+    # 同 load_api_key：默认参数不能用 STATE_FILE，否则定义时求值、无法替换。
+    if state_file is None:
+        state_file = STATE_FILE
+
     if not state_file.exists():
         raise SystemExit(f"{state_file.name} 不存在，请先运行 ujn_webvpn_login.py")
 

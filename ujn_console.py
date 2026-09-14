@@ -15,9 +15,18 @@ import sys
 
 
 def enable_utf8_stdout() -> None:
-    """把 stdout 切到 UTF-8（不支持时静默跳过）。
+    """把 stdout 与 stderr 都切到 UTF-8（不支持时静默跳过）。
 
     在程序入口调用一次即可。重定向到文件或管道时同样有效。
+
+    两个流都要切：警告走 stderr，若只切 stdout，在 cp1252/ascii 这类
+    不含中文的代码页下打印中文警告会抛 UnicodeEncodeError —— 而警告通常
+    出现在"主任务已成功"之后的路径上，异常冒泡会让调用方误判为整步失败。
+
+    名字保留 stdout（既有调用点很多），但行为已覆盖 stderr。
+    errors="replace" 而不是 strict：宁可输出降级成 '?'，也不要在
+    报错路径上再抛一次异常。
     """
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")

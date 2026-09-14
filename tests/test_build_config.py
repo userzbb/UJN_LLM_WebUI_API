@@ -162,7 +162,12 @@ def test_read_yaml_scalar_matches_real_yaml_parser():
 
 
 def test_load_proxy_settings_accepts_readme_style_config(tmp_path):
-    """把 README 的写法填上真值后必须能正常读出——这正是用户会做的第一步。"""
+    """把 README 的写法填上真值后必须能正常读出——这正是用户会做的第一步。
+
+    必须显式传 state_file 指向不存在的文件：本用例验证的是【纯 config.yaml】
+    这条路径，而真实 state 文件在开发机上通常存在且含 JWT，会盖过 api_key。
+    不隔离的话，这个测试的通过与否取决于跑测试的机器 —— 那是最糟的一类测试。
+    """
     from build_litellm_config import load_proxy_settings
 
     config = tmp_path / "config.yaml"
@@ -176,7 +181,7 @@ def test_load_proxy_settings_accepts_readme_style_config(tmp_path):
         encoding="utf-8",
     )
 
-    settings = load_proxy_settings(config)
+    settings = load_proxy_settings(config, state_file=tmp_path / "no-state.json")
     assert settings["api_key"] == "sk-real"
     assert settings["api_base"] == "https://webvpn.ujn.edu.cn/https/abc/api"
     assert settings["host_query"] == "vpn-12-o2-chat.ujn.edu.cn"
@@ -315,6 +320,61 @@ def test_webvpn_path_segment_starts_with_the_public_constant():
 
     assert bytes.fromhex(segment)[:16] == b"wrdvpnisthebest!"
     assert segment.isalnum() and segment == segment.lower()
+
+
+def test_no_proxy_value_covers_ujn_and_loopback():
+    """必须让 LiteLLM 绕过系统代理，否则用户关掉代理软件就 500。
+
+    实测根因（2026-09-14）：run.ps1 在 PowerShell 里跑，若 profile 设了
+    HTTP_PROXY/HTTPS_PROXY（FlClash 等），LiteLLM 子进程会继承它，把上游请求
+    发给那个代理；代理软件一关就变成死地址 -> 上游全部 500。
+
+    用死端口 9 模拟"代理已关"实测：
+      NO_PROXY=localhost,127.0.0.1              -> HTTP 500（复现故障）
+      NO_PROXY=localhost,127.0.0.1,.ujn.edu.cn  -> HTTP 200
+    """
+    from build_litellm_config import NO_PROXY_VALUE
+
+    entries = [e.strip() for e in NO_PROXY_VALUE.split(",")]
+
+    # webvpn.ujn.edu.cn 必须被覆盖 —— 用后缀以便换子系统时不必再改
+    assert ".ujn.edu.cn" in entries, f"NO_PROXY_VALUE 缺 .ujn.edu.cn: {NO_PROXY_VALUE}"
+    # Loopback 也要在：LiteLLM 自己与健康检查都走本机
+    assert "localhost" in entries
+    assert "127.0.0.1" in entries
+
+
+def test_client_templates_are_not_polluted_by_no_proxy_value():
+    """NO_PROXY_VALUE 只用于 run.ps1 的环境，别漏进生成的客户端配置。
+
+    客户端配置里的 NO_PROXY 是给 Claude Code / Codex 连【本机 4000】用的，
+    加 .ujn.edu.cn 没意义（客户端不直连上游，只连 LiteLLM）。
+    """
+    import json
+
+    from build_litellm_config import render_claude_settings
+
+    env = json.loads(render_claude_settings(["m"]))["env"]
+
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+    assert ".ujn.edu.cn" not in env["NO_PROXY"]
+
+
+def test_shared_helpers_are_still_importable_from_build_module():
+    """这些名字原属 build_litellm_config，2026-09 搬到了 ujn_webvpn。
+
+    搬家时在 build 模块里重新导出，是为了不断掉外部与既有测试的 import。
+    这条测试钉住那个承诺：以后清理 import 时别把这几个当"未使用"删掉。
+    """
+    from build_litellm_config import (  # noqa: F401
+        WRD_CONSTANT,
+        WEBVPN_ORIGIN,
+        extract_host_from_query,
+        webvpn_path_segment,
+    )
+
+    assert WRD_CONSTANT == b"wrdvpnisthebest!"
+    assert WEBVPN_ORIGIN == "https://webvpn.ujn.edu.cn"
 
 
 def test_extract_host_from_query_strips_vpn_prefix():
