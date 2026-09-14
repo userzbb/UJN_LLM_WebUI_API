@@ -50,20 +50,6 @@ BROWSER_HEADERS = {
     "User-Agent": USER_AGENT,
 }
 
-# 必须让 LiteLLM 绕过系统代理，否则关掉代理软件就 500。
-#
-# 实测根因（2026-09-14）：run.ps1 跑在 PowerShell 里，若 profile 设了
-#   $env:HTTP_PROXY / $env:HTTPS_PROXY（FlClash 等工具很常见），
-# LiteLLM 子进程会继承它们，把【所有】上游请求发给那个代理。
-# 代理软件一关，7897 变成死地址，LiteLLM 仍往那儿发 -> 上游全部 500。
-#
-# 而 webvpn.ujn.edu.cn 解析到 202.194.65.6（国内教育网），实测直连 TLSv1.3 仅 0.2s，
-# 根本不需要代理 —— 代理纯属多余，且是故障源。
-#
-# 用后缀 .ujn.edu.cn 而不是单个主机名：将来换 chat 之外的子系统也不必再改。
-# 保持 localhost/127.0.0.1：LiteLLM 自己也要连本机。
-NO_PROXY_VALUE = "localhost,127.0.0.1,.ujn.edu.cn"
-
 
 def read_yaml_scalar(text: str, key: str) -> str | None:
     """从 YAML 文本里取一个标量值，嵌套任意深度都能找到。
@@ -273,6 +259,16 @@ TIER_HAIKU  = "GLM-5.3-Flash"
 # 其他客户端不能带 —— 它们原样透传，上游查不到该名字会 400。
 CLAUDE_SUFFIX = "[1M]"
 
+# 客户端范本里的 NO_PROXY：客户端只连【本机 LiteLLM】，不直连上游，
+# 所以不需要 .ujn.edu.cn（那是只给 run.ps1 / LiteLLM 那条腿用的）。
+#
+# 两种拼写都给：Windows 上 NO_PROXY 与 no_proxy 是同一个变量，给一份就够，
+# 但这份 JSON 是给用户复制的范本，跨平台（Linux/macOS 区分大小写）时
+# 两个拼写都需要 —— 保留两份、值保持一致。
+#
+# ::1（IPv6 回环）不能漏：客户端有时按 IPv6 写法连本机，漏掉会时好时坏。
+CLIENT_NO_PROXY = "localhost,127.0.0.1,::1"
+
 
 def pick_tier_models(models: list[str]) -> dict[str, str]:
     """为四个档位挑模型；首选模型不在清单里时退回第一个可用的。"""
@@ -309,8 +305,8 @@ def render_claude_settings(models: list[str], port: int = 4000) -> str:
             "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers["sonnet"] + CLAUDE_SUFFIX,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL":  tiers["haiku"]  + CLAUDE_SUFFIX,
             "ANTHROPIC_MODEL": tiers["fable"] + CLAUDE_SUFFIX,
-            "NO_PROXY": "localhost,127.0.0.1",
-            "no_proxy": "localhost,127.0.0.1",
+            "NO_PROXY": CLIENT_NO_PROXY,
+            "no_proxy": CLIENT_NO_PROXY,
         }
     }
     return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
@@ -341,8 +337,8 @@ def render_ccswitch(models: list[str], port: int = 4000) -> str:
             "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers["sonnet"] + CLAUDE_SUFFIX,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL":  tiers["haiku"]  + CLAUDE_SUFFIX,
             "ANTHROPIC_MODEL": tiers["fable"] + CLAUDE_SUFFIX,
-            "NO_PROXY": "localhost,127.0.0.1",
-            "no_proxy": "localhost,127.0.0.1",
+            "NO_PROXY": CLIENT_NO_PROXY,
+            "no_proxy": CLIENT_NO_PROXY,
         },
     }
     return json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"

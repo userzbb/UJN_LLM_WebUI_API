@@ -322,7 +322,7 @@ def test_webvpn_path_segment_starts_with_the_public_constant():
     assert segment.isalnum() and segment == segment.lower()
 
 
-def test_no_proxy_value_covers_ujn_and_loopback():
+def test_run_script_no_proxy_covers_ujn_and_both_loopbacks():
     """必须让 LiteLLM 绕过系统代理，否则用户关掉代理软件就 500。
 
     实测根因（2026-09-14）：run.ps1 在 PowerShell 里跑，若 profile 设了
@@ -332,23 +332,52 @@ def test_no_proxy_value_covers_ujn_and_loopback():
     用死端口 9 模拟"代理已关"实测：
       NO_PROXY=localhost,127.0.0.1              -> HTTP 500（复现故障）
       NO_PROXY=localhost,127.0.0.1,.ujn.edu.cn  -> HTTP 200
+
+    【直接解析 run.ps1】而不是断言某个 Python 常量：早先这里断言的是一个
+    只存在于 Python 里、没有任何运行代码使用的副本 —— 那样即使 run.ps1 写错了
+    （而它才是真正生效的地方），测试也照样通过。现在钉的是生效的那份。
     """
-    from build_litellm_config import NO_PROXY_VALUE
+    import re
+    from pathlib import Path
 
-    entries = [e.strip() for e in NO_PROXY_VALUE.split(",")]
+    script = (Path(__file__).resolve().parent.parent / "run.ps1").read_text(encoding="utf-8")
+    match = re.search(r'^\s*\$parts\s*=\s*@\(([^)]*)\)', script, re.MULTILINE)
+    assert match, "run.ps1 里找不到 $parts = @(...) 的 NO_PROXY 清单"
 
-    # webvpn.ujn.edu.cn 必须被覆盖 —— 用后缀以便换子系统时不必再改
-    assert ".ujn.edu.cn" in entries, f"NO_PROXY_VALUE 缺 .ujn.edu.cn: {NO_PROXY_VALUE}"
-    # Loopback 也要在：LiteLLM 自己与健康检查都走本机
+    entries = [e.strip().strip('"').strip("'") for e in match.group(1).split(",")]
+    entries = [e for e in entries if e]
+
+    # webvpn.ujn.edu.cn 必须被覆盖 —— 用后缀，换子系统时不必再改
+    assert ".ujn.edu.cn" in entries, f"run.ps1 的 NO_PROXY 缺 .ujn.edu.cn: {entries}"
+    # 两种回环都要：客户端有时按 IPv6 写法连本机，漏掉 ::1 会时好时坏
     assert "localhost" in entries
     assert "127.0.0.1" in entries
+    assert "::1" in entries
 
 
-def test_client_templates_are_not_polluted_by_no_proxy_value():
-    """NO_PROXY_VALUE 只用于 run.ps1 的环境，别漏进生成的客户端配置。
+def test_run_script_merges_rather_than_overwrites_no_proxy():
+    """不能直接赋值 —— 会盖掉用户 profile 里已有的 NO_PROXY 例外。"""
+    import re
+    from pathlib import Path
 
-    客户端配置里的 NO_PROXY 是给 Claude Code / Codex 连【本机 4000】用的，
-    加 .ujn.edu.cn 没意义（客户端不直连上游，只连 LiteLLM）。
+    script = (Path(__file__).resolve().parent.parent / "run.ps1").read_text(encoding="utf-8")
+
+    assert "$env:NO_PROXY = $parts -join" in script, "应把既有值并入后再写回"
+
+    # 也不该再出现 no_proxy 的双写：Windows 环境变量不区分大小写，那是冗余。
+    # 必须先剥掉注释再查 —— 注释里正解释"不要这么写"，会误伤。
+    code = "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(r'^\s*\$env:no_proxy\s*=', code, re.MULTILINE), (
+        "Windows 上 NO_PROXY 与 no_proxy 是同一个变量，再设一遍是冗余"
+    )
+
+
+def test_client_templates_are_not_polluted_by_ujn_suffix():
+    """客户端范本里的 NO_PROXY 只服务"连本机 4000"，别混进 .ujn.edu.cn。
+
+    客户端不直连上游（只连 LiteLLM），加校园网后缀没意义。
     """
     import json
 
@@ -356,8 +385,34 @@ def test_client_templates_are_not_polluted_by_no_proxy_value():
 
     env = json.loads(render_claude_settings(["m"]))["env"]
 
-    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+    assert "127.0.0.1" in env["NO_PROXY"]
     assert ".ujn.edu.cn" not in env["NO_PROXY"]
+    # Windows 环境变量不区分大小写：同时写 NO_PROXY 和 no_proxy 是冗余，
+    # 但生成的 JSON 是给用户的范本，保留两种拼写对跨平台用户无害 —— 只要值一致。
+    if "no_proxy" in env:
+        assert env["no_proxy"] == env["NO_PROXY"]
+
+
+def test_client_no_proxy_includes_ipv6_loopback():
+    """客户端范本必须含 ::1 —— 客户端有时按 IPv6 写法连本机。
+
+    漏掉它会让「客户端 → 本机 4000」这条腿时好时坏：走 IPv4 字面量时正常，
+    走 ::1 时仍被代理接管。这是最难查的一类间歇故障。
+    """
+    import json
+
+    from build_litellm_config import CLIENT_NO_PROXY, render_claude_settings, render_ccswitch
+
+    entries = [e.strip() for e in CLIENT_NO_PROXY.split(",")]
+    assert "localhost" in entries
+    assert "127.0.0.1" in entries
+    assert "::1" in entries
+
+    # 两个范本都要带上，别只改了一处
+    claude_env = json.loads(render_claude_settings(["m"]))["env"]
+    cc_env = json.loads(render_ccswitch(["m"]))["env"]
+    assert claude_env["NO_PROXY"] == CLIENT_NO_PROXY
+    assert cc_env["NO_PROXY"] == CLIENT_NO_PROXY
 
 
 def test_shared_helpers_are_still_importable_from_build_module():

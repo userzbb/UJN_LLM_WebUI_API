@@ -7,7 +7,7 @@
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.3-Flash[1M]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-5.3-Flash[1M]",
     "ANTHROPIC_MODEL": "deepseek-v41-flash[1M]",
-    "NO_PROXY": "localhost,127.0.0.1",
-    "no_proxy": "localhost,127.0.0.1"
+    "NO_PROXY": "localhost,127.0.0.1,::1",
+    "no_proxy": "localhost,127.0.0.1,::1"
   }
 }

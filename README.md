@@ -281,20 +281,51 @@ setx UJN_DUMMY_KEY "dummy"
 
 把 `clients/opencode.json` 复制到项目目录或 `~/.config/opencode/opencode.json`。
 
-### 本地直连
+### 代理：让本机与校园网直连
 
-（`run.ps1` 会自动设置这一节的内容，手工启动 LiteLLM 时才需要自己来。）
-
-若开了系统代理或梯子，必须让**本地地址和校园网地址**都直连：
+若开了系统代理或梯子（Clash / FlClash / v2ray 等），**代理会让本项目坏掉**。
+`NO_PROXY` 按主机名匹配、**不区分端口**，写 `127.0.0.1` 就覆盖了它的所有端口（含 4000）。
 
 ```powershell
-$env:NO_PROXY = "localhost,127.0.0.1,.ujn.edu.cn"
-$env:no_proxy = "localhost,127.0.0.1,.ujn.edu.cn"
+$env:NO_PROXY = "localhost,127.0.0.1,::1,.ujn.edu.cn"
 ```
 
-> ⚠ **`.ujn.edu.cn` 不能漏。** 只写 `localhost,127.0.0.1` 时，LiteLLM 会把上游请求
-> 发给你的代理软件；代理一关就变成死地址，上游全部 `500`（开着代理才正常）。
-> 而 webvpn 是国内教育网地址，实测直连 0.2s，本来就不需要代理。
+> Windows 的环境变量**不区分大小写**，`NO_PROXY` 与 `no_proxy` 是同一个变量，
+> 设一行即可。（Linux/macOS 上才是两个独立变量，需分别设置。）
+
+**建议加进 PowerShell profile**（`$PROFILE`），这样新开的终端都自动生效：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7897"     # 你的代理
+$env:HTTPS_PROXY="http://127.0.0.1:7897"
+$env:NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
+```
+
+#### 为什么必须设：两条腿都会断
+
+| 受影响的链路 | 关掉代理软件后的症状 |
+|---|---|
+| **客户端 → 本机 4000**（Claude Code / Codex / OpenCode） | `Connection failed` / `ConnectError 10061` |
+| **LiteLLM → 上游 webvpn** | 上游请求全部 `500` |
+
+两条腿的根因相同：程序继承了 `HTTP_PROXY`，把本该直连的地址也发给代理；
+**代理软件一关，端口变成死地址** —— 于是表现为「必须开着梯子才能用」。
+
+- `::1` 是 IPv6 回环，**不能漏**：客户端有时按 IPv6 写法连本机，漏掉会时好时坏。
+- `.ujn.edu.cn` 是校园网后缀，实测直连 TLSv1.3 仅 0.2s，本就不需要代理。
+
+`run.ps1` 会自己设置这份清单（并**合并**你已有的值，不会覆盖），
+所以它自己和它启动的 LiteLLM 子进程一定安全；但它管不到独立启动的客户端，
+客户端那条腿靠上面的 profile。
+
+> ⚠ 若代理软件跑在 **TUN / 全局模式**，它可能无视 `NO_PROXY` 直接劫持流量 ——
+> 那种情况要在代理软件里为 `127.0.0.1`、`*.ujn.edu.cn` 配直连规则。
+
+#### 客户端范本里已包含 NO_PROXY
+
+`clients/claude-settings.json` 与 `clients/ccswitch.json` 里已有
+`"NO_PROXY": "localhost,127.0.0.1"`。若你的 Claude Code 配置不是从这里复制的，
+**记得补上** —— 否则会踩上面第一条腿。
 
 ## 模型列表
 
@@ -440,16 +471,27 @@ uv run python build_litellm_config.py
 注意这个告警**不影响 Cookie 刷新**，登录本身仍是成功的（退出码 0）。
 此时脚本会沿用上一次保存的 JWT。
 
-**一关掉代理软件就 `500`（开着才正常）**
-→ 你的 PowerShell profile 里设了 `HTTP_PROXY` / `HTTPS_PROXY`（FlClash 等常见），
-`run.ps1` 继承它，LiteLLM 子进程再把**所有**上游请求发给那个代理。
-代理软件一关，端口变成死地址 → 上游全部 500。
+**一关掉代理软件就报错（开着才正常）**
 
-`webvpn.ujn.edu.cn` 解析到 `202.194.65.6`（国内教育网），实测直连 TLSv1.3 仅 0.2s，
-**不需要代理**。`run.ps1` 已自动把 `.ujn.edu.cn` 并入 `NO_PROXY`，无需手工处理。
+症状取决于断在哪条腿，根因是同一个：程序继承了 `HTTP_PROXY`，
+把本该直连的地址也发给代理，代理一关就成死地址。
 
-若你的代理软件跑在 TUN/全局模式，它可能无视 `NO_PROXY` 直接劫持流量 ——
-那种情况请在代理软件里为 `*.ujn.edu.cn` 配一条直连规则。
+| 症状 | 断掉的链路 | 在哪修 |
+|---|---|---|
+| 客户端报 `Connection failed` / `ConnectError 10061` | 客户端 → 本机 4000 | 客户端所在环境要设 `NO_PROXY` |
+| 上游请求全部 `500` | LiteLLM → webvpn | `run.ps1` 已自动处理 |
+
+两种都靠 `NO_PROXY` 覆盖本机与校园网地址，详见上文「代理：让本机与校园网直连」：
+
+```powershell
+$env:NO_PROXY = "localhost,127.0.0.1,::1,.ujn.edu.cn"
+```
+
+最省事的做法是加进 PowerShell profile（`$PROFILE`），这样所有终端程序一起好。
+注意改完要**重开终端**（以及重开客户端）才会生效。
+
+若代理软件跑在 TUN/全局模式，它可能无视 `NO_PROXY` 直接劫持流量 ——
+那种情况要在代理软件里为 `127.0.0.1`、`*.ujn.edu.cn` 配直连规则。
 
 **`403 Not authenticated`**
 → 请求没带 Cookie（只有 JWT 是不够的）。确认 `ujn_webvpn_state.json` 里

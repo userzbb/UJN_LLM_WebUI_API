@@ -21,10 +21,10 @@ Set-Location $ProjectDir
 #
 # 用赋值会盖掉用户 profile 里已有的 NO_PROXY，所以先并入既有值再写回。
 #
-# 注意：Windows 环境变量【不区分大小写】，$env:NO_PROXY 与 $env:no_proxy 是同一个变量。
-# 别写成 foreach (@($env:NO_PROXY, $env:no_proxy)) —— 第二个元素是同值，
-# 看起来是"合并两个来源"，实际只是把同一个值读了两遍。
-$parts = @("localhost", "127.0.0.1", ".ujn.edu.cn")
+# 注意：Windows 环境变量【不区分大小写】，NO_PROXY 与 no_proxy 是同一个变量，
+# 设一次即可 —— 不要再写 $env:no_proxy = ... （那是 Linux/macOS 的习惯，
+# 那边两个拼写才是独立的；在 Windows 上纯属冗余）。
+$parts = @("localhost", "127.0.0.1", "::1", ".ujn.edu.cn")
 foreach ($existing in @($env:NO_PROXY)) {
     if ($existing) {
         foreach ($item in ($existing -split ",")) {
@@ -33,9 +33,7 @@ foreach ($existing in @($env:NO_PROXY)) {
         }
     }
 }
-$noProxyValue = $parts -join ","
-$env:NO_PROXY = $noProxyValue
-$env:no_proxy = $noProxyValue
+$env:NO_PROXY = $parts -join ","
 $env:PYTHONIOENCODING = "utf-8"
 
 $script:ProxyProcess = $null
