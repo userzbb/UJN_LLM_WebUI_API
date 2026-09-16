@@ -7,7 +7,7 @@
 # model 填上游真实模型名（见 models.yaml），不要填 gpt-*/claude-* 之类的别名。
 # 【不要】加 [1M] 后缀 —— 那是 Claude Code 专用标记，Codex 会原样透传导致 400。
 
-model = "deepseek-v41-flash"
+model = "deepseek-v4-flash"
 model_provider = "ujn"
 
 [model_providers.ujn]

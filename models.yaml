@@ -1,12 +1,11 @@
 # 上游模型 id 列表。直接以原名对外暴露，不做别名映射。
 # 客户端（Claude Code / Codex / OpenCode）填的就是这里的名字。
-# 上游清单会变，用 `uv run python build_litellm_config.py --list-upstream` 查看当前值。
+# 本文件由 `uv run python build_litellm_config.py --sync-models` 生成。
+# 快照时间: 2026-09-16 —— 上游会更新，此列表可能已过期。
 models:
-  - GLM-5.3
-  - deepseek-v41-flash
-  - 1.Qwen3.5-27B
-  - Qwen3.6-27B
-  - GLM-5.3-Flash
-  - deepseek-v4-flash
-  - Qwen3.8-27B
-  - /models/Qwen3.8-Flash-Next
+- GLM-5.3
+- 1.Qwen3.5-27B
+- Qwen3.6-27B
+- GLM-5.3-Flash
+- deepseek-v4-flash
+- /models/Qwen3.8-Flash-Next

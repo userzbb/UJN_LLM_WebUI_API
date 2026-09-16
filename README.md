@@ -369,18 +369,25 @@ uv run python build_litellm_config.py --list-upstream
 (Invoke-RestMethod http://127.0.0.1:4000/v1/models).data.id
 ```
 
-**用返回列表里的 id 作为模型名。** 或者直接一键同步：
+**用返回列表里的 id 作为模型名。**
+
+### 模型清单会自动同步（上游随时下线模型）
+
+`build_litellm_config.py` 生成配置前会**自动拉一次上游清单**更新 `models.yaml`
+（`run.ps1` 每 30 分钟刷新与每次按需重启都会走这条路，所以最多滞后 30 分钟）。
+新增/下线的模型都会打印出来；**拉取失败不阻断**，沿用本地清单继续生成。
+
+> ⚠ 自动同步只更新**代理侧**。你客户端配置里写死的模型名（如
+> `~/.claude/settings.json` 的 `ANTHROPIC_MODEL`）**不会跟着变** ——
+> 正在用的模型被下线时，`clients/` 下范本已更新，但要把新模型名抄回你的客户端配置。
+
+实测记录（2026-09）：上游禁用了 `deepseek-v41-flash`、`Qwen3.8-27B`，
+本地未同步时代理仍暴露它们，调用即 `400 Model not found`。
+
+手动一键同步仍可用（效果与自动一致，想立刻看差异时用）：
 
 ```powershell
 uv run python build_litellm_config.py --sync-models
-```
-
-它按上游清单更新 `models.yaml`，并报告新增/下线的模型；**已是最新时不动文件**。
-同步完重新生成配置并重启：
-
-```powershell
-uv run python build_litellm_config.py
-# 然后 Ctrl+C 停掉代理，重跑 run.ps1
 ```
 
 ### ⚠ Qwen 系列不能用在 Claude Code 里
@@ -435,7 +442,9 @@ litellm_params:
 两者的形态现在都能通 —— 因为都统一丢弃了。
 
 **`Model not found`**
-→ 上游模型下线了。运行 `--list-upstream` 查看当前清单，更新 `models.yaml`。
+→ 上游模型下线了。`build_litellm_config.py` 生成配置时会自动同步清单
+（`run.ps1` 每 30 分钟也会走一次）—— 但**你客户端里写死的模型名不会自动变**，
+按报错里的模型名到 `clients/` 范本里找替代，抄回客户端配置。
 
 **启动崩溃 `UnicodeDecodeError: 'gbk' codec`**
 → `litellm_config.yaml` 里混入了非 ASCII 字符。LiteLLM 用系统默认编码读它，

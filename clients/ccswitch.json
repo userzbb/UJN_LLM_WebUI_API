@@ -6,20 +6,20 @@
     "apiFormat": "anthropic"
   },
   "models": {
-    "default": "deepseek-v41-flash",
-    "fable": "deepseek-v41-flash",
-    "opus": "deepseek-v41-flash",
+    "default": "deepseek-v4-flash",
+    "fable": "deepseek-v4-flash",
+    "opus": "deepseek-v4-flash",
     "sonnet": "GLM-5.3-Flash",
     "haiku": "GLM-5.3-Flash"
   },
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "dummy",
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4000",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "deepseek-v41-flash[1M]",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v41-flash[1M]",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "deepseek-v4-flash[1M]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-flash[1M]",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "GLM-5.3-Flash[1M]",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-5.3-Flash[1M]",
-    "ANTHROPIC_MODEL": "deepseek-v41-flash[1M]",
+    "ANTHROPIC_MODEL": "deepseek-v4-flash[1M]",
     "NO_PROXY": "localhost,127.0.0.1,::1",
     "no_proxy": "localhost,127.0.0.1,::1"
   }

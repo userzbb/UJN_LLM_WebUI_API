@@ -323,6 +323,10 @@ if (-not $probeModel) {
 } else {
     Write-Stamp "探测用模型: $probeModel"
 }
+# 注意：$probeModel 只是启动时的初始值。models.yaml 会被自动同步更新
+# （build 脚本生成配置前会拉上游清单，上游随时可能下线模型），探测模型
+# 若固定不重读，就会指向一个已下线的模型，探测永远 400 -> 守护误判。
+# 所以守护循环里每轮探测前要重新 Get-ProbeModel。
 
 Write-Stamp "启动 LiteLLM 代理..."
 Start-Proxy
@@ -368,6 +372,9 @@ try {
             continue
         }
 
+        # 每轮重读：models.yaml 可能刚被自动同步改过（上游下线了探测模型时），
+        # 固定用启动时那个值会让探测永远 400，守护误判成配置问题。
+        $probeModel = Get-ProbeModel
         $state = Test-ProxyUpstream -Model $probeModel
 
         switch ($state) {

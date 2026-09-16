@@ -284,6 +284,71 @@ def test_sync_models_writes_new_file_when_changed(tmp_path):
     assert load_models(path) == ["old", "new"]
 
 
+def test_auto_sync_removes_models_disabled_by_upstream(tmp_path, capsys, monkeypatch):
+    """生成配置前的自动同步必须能【删除】上游已下线的模型。
+
+    实测背景（2026-09）：上游禁用了 deepseek-v41-flash / Qwen3.8-27B，
+    本地 models.yaml 若不跟着删，代理会对外暴露一个必然 400
+    "Model not found" 的名字，客户端表现为"莫名不能用"。
+    """
+    import build_litellm_config as b
+
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - alive\n  - deepseek-v41-flash\n  - Qwen3.8-27B\n",
+                    encoding="utf-8")
+
+    # 打桩：上游只返回 alive —— 模拟两个模型被禁用
+    monkeypatch.setattr(b, "fetch_upstream_models", lambda *a, **k: [{"id": "alive"}])
+    monkeypatch.setattr(b, "load_proxy_settings", lambda *a, **k: {
+        "api_base": "https://x/api", "host_query": "", "api_key": "k"})
+    monkeypatch.setattr(b, "load_cookie_header", lambda *a, **k: "c=1")
+    monkeypatch.setattr(b, "render_config", lambda *a, **k: "stub: ascii\n")
+
+    out = tmp_path / "out.yaml"
+    monkeypatch.setattr("sys.argv", [
+        "x", "--out", str(out),
+        "--models-file", str(path),
+        "--clients-dir", str(tmp_path / "clients"),
+    ])
+    b.main()
+
+    assert load_models(path) == ["alive"], "被禁用的模型必须被自动删除"
+    assert "deepseek-v41-flash" not in path.read_text(encoding="utf-8")
+    captured = capsys.readouterr()
+    # 删除动作要让用户看得见，而不是静默改配置（删除是正常同步报告 -> stdout）
+    assert "deepseek-v41-flash" in captured.out
+    assert "Qwen3.8-27B" in captured.out
+
+
+def test_auto_sync_failure_does_not_block_generation(tmp_path, capsys, monkeypatch):
+    """拉取上游失败时必须沿用本地清单继续生成 —— 否则网络一抖，
+    run.ps1 的重启路径整体失灵。"""
+    import build_litellm_config as b
+
+    path = tmp_path / "models.yaml"
+    path.write_text("models:\n  - local-model\n", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise ConnectionError("network down")
+
+    monkeypatch.setattr(b, "fetch_upstream_models", boom)
+    monkeypatch.setattr(b, "load_proxy_settings", lambda *a, **k: {
+        "api_base": "https://x/api", "host_query": "", "api_key": "k"})
+    monkeypatch.setattr(b, "load_cookie_header", lambda *a, **k: "c=1")
+    monkeypatch.setattr(b, "render_config", lambda *a, **k: "stub: ascii\n")
+
+    out = tmp_path / "out.yaml"
+    monkeypatch.setattr("sys.argv", [
+        "x", "--out", str(out),
+        "--models-file", str(path),
+        "--clients-dir", str(tmp_path / "clients"),
+    ])
+    b.main()  # 不抛即通过
+
+    assert "ConnectionError" in capsys.readouterr().err, "失败原因应打到 stderr"
+    assert load_models(path) == ["local-model"], "本地清单不应被失败的同步破坏"
+
+
 # --- WebVPN 路径段：可从主机名推导，不是密钥 --------------------------------
 
 def test_webvpn_path_segment_matches_the_live_config():
@@ -479,13 +544,17 @@ def test_render_config_still_pure_ascii_with_drop_params():
 # --- 客户端范本生成（clients/*，从 models.yaml 派生，避免漂移）---------------
 
 def test_pick_tier_models_prefers_the_fast_1m_models():
-    """四档默认用实测最快且 1M 上下文的两个模型。"""
+    """四档默认用实测最快且 1M 上下文的两个模型。
+
+    （deepseek-v41-flash 已于 2026-09 被上游禁用，首选改为同家族的
+    deepseek-v4-flash —— 上游 /models 实测 ctx=1048576。）
+    """
     from build_litellm_config import pick_tier_models
 
-    tiers = pick_tier_models(["GLM-5.3", "deepseek-v41-flash", "GLM-5.3-Flash"])
+    tiers = pick_tier_models(["GLM-5.3", "deepseek-v4-flash", "GLM-5.3-Flash"])
 
-    assert tiers["fable"] == "deepseek-v41-flash"
-    assert tiers["opus"] == "deepseek-v41-flash"
+    assert tiers["fable"] == "deepseek-v4-flash"
+    assert tiers["opus"] == "deepseek-v4-flash"
     assert tiers["sonnet"] == "GLM-5.3-Flash"
     assert tiers["haiku"] == "GLM-5.3-Flash"
 

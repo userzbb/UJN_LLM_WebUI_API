@@ -250,8 +250,11 @@ def build_target_url(api_base: str, host_query: str) -> str:
 # ccswitch.json 缺了 FABLE 档与 [1M] 后缀，opencode.json 少一个模型）。
 
 # 四档默认值。两个都是实测最快且 1M 上下文的模型。
-TIER_FABLE  = "deepseek-v41-flash"
-TIER_OPUS   = "deepseek-v41-flash"
+# 注意：上游会下线模型（deepseek-v41-flash 已于 2026-09 被禁用）。
+# 这里填的值失效时，pick_tier_models 会退回 models.yaml 的第一个 ——
+# 那个模型未必也是 1M 的，所以 preferred 尽量保持指向现役的 1M 模型。
+TIER_FABLE  = "deepseek-v4-flash"
+TIER_OPUS   = "deepseek-v4-flash"
 TIER_SONNET = "GLM-5.3-Flash"
 TIER_HAIKU  = "GLM-5.3-Flash"
 
@@ -476,8 +479,21 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[str
     return yaml.safe_dump(config, allow_unicode=False, sort_keys=False, default_flow_style=False)
 
 
-def fetch_upstream_models(settings: dict[str, str], cookie_header: str) -> list[dict]:
-    """拉取上游的模型条目（含 max_model_len），保持上游返回顺序。"""
+# 生成配置前自动同步用的拉取超时。正常 1-2s；给到 15s 是为了容忍上游偶发慢，
+# 但绝不能像显式操作那样等 60s —— run.ps1 每 30 分钟与每次按需重启都会走这里。
+AUTO_SYNC_TIMEOUT = 15
+
+
+def fetch_upstream_models(
+    settings: dict[str, str], cookie_header: str, timeout: float = 60
+) -> list[dict]:
+    """拉取上游的模型条目（含 max_model_len），保持上游返回顺序。
+
+    timeout 可调：--list-upstream / --sync-models 是显式操作，等得起，
+    默认 60s；生成配置前的【自动】同步用短超时（AUTO_SYNC_TIMEOUT）——
+    离线时最多等几秒就回退到本地清单，
+    不能让 run.ps1 每次生成都为一次必然失败的网络请求卡一分钟。
+    """
     import httpx
 
     url = build_target_url(settings["api_base"], settings["host_query"])
@@ -486,7 +502,7 @@ def fetch_upstream_models(settings: dict[str, str], cookie_header: str) -> list[
     headers["Authorization"] = f"Bearer {settings['api_key']}"
 
     models_url = url.replace("/chat/completions", "/models")
-    response = httpx.get(models_url, headers=headers, timeout=60, trust_env=False)
+    response = httpx.get(models_url, headers=headers, timeout=timeout, trust_env=False)
     response.raise_for_status()
     return list(response.json().get("data", []))
 
@@ -554,7 +570,43 @@ def main() -> None:
             print("  uv run python build_litellm_config.py")
         return
 
-    models = load_models()
+    # 生成配置前自动对齐上游清单：上游会随时下线模型（实测 2026-09：
+    # deepseek-v41-flash、Qwen3.8-27B 被禁用），照旧用本地清单会对外暴露
+    # 一个必然 400 "Model not found" 的名字。
+    #
+    # 失败【不阻断】：网络抖一下就放弃生成，会让 run.ps1 的重启路径整体失灵；
+    # 沿用现有 models.yaml 至少能让还活着的模型继续服务。
+    # 探测上游只用来同步清单，所以无论同步成败都继续往下走。
+    models = load_models(Path(args.models_file))
+    try:
+        items = fetch_upstream_models(
+            settings, cookie_header, timeout=AUTO_SYNC_TIMEOUT
+        )
+        upstream = [str(i.get("id")).strip() for i in items if str(i.get("id") or "").strip()]
+        if not upstream:
+            print("警告：上游返回了空模型清单（可能异常），沿用本地 models.yaml", file=sys.stderr)
+        else:
+            models, added, removed = sync_models_file(
+                upstream, Path(args.models_file), date.today().isoformat()
+            )
+            for name in added:
+                print(f"  自动同步 + {name}")
+            for name in removed:
+                print(f"  自动同步 - {name}")
+            if added or removed:
+                print(f"  （models.yaml 已更新：{len(models)} 个模型）")
+            if added:
+                # 放 stderr：新增模型需要用户行动（客户端配置要跟着改），
+                # 和普通的同步报告不是一回事。
+                print(f"⚠ 新增了模型 —— 客户端若要用，需把配置里的模型名一并更新"
+                      f"（clients/ 下范本已同步）", file=sys.stderr)
+    except Exception as exc:
+        print(
+            f"警告：自动同步模型清单失败（{type(exc).__name__}），"
+            f"沿用本地 models.yaml（{len(models)} 个模型）",
+            file=sys.stderr,
+        )
+
     content = render_config(settings, cookie_header, models)
 
     # 双保险：LiteLLM 用 GBK 读这个文件，非 ASCII 会崩。
