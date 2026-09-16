@@ -200,19 +200,48 @@ def test_load_config_last_seen_wins_on_nested_and_top_level():
         path.unlink(missing_ok=True)
 
 
+class FakeLocator:
+    """打桩的 Playwright locator，记录 fill/click 调用。"""
+
+    def __init__(self, fake_page, kind):
+        self._page = fake_page
+        self._kind = kind
+
+    def count(self):
+        # 选择器带 ":hidden" 后缀 = 该元素当前不可见（FakePage.locator 决定）
+        return 0 if self._kind.endswith(":hidden") else 1
+
+    @property
+    def first(self):
+        # try_chat_login 用 .first.fill() / .first.click()，桩上原样返回自身
+        return self
+
+    def fill(self, value, timeout=None):
+        self._page.filled[self._kind] = value
+
+    def click(self, timeout=None):
+        self._page.clicked.append(self._kind)
+
+
 class FakePage:
     """打桩的 Playwright page。
 
-    storage: 模拟 localStorage/sessionStorage 的键值对。
-    raise_on_goto: 模拟导航超时。
     values: 依次返回的 evaluate 结果（模拟"JWT 稍后才出现"）。
+    has_password_field: 轮询期间 password 框是否可见（模拟 ChatUJN /auth 登录页）。
+    login_fills / login_clicks: try_chat_login 的行为记录。
+    locator_error: 模拟表单填写抛异常（页面改版）。
     """
 
-    def __init__(self, values, raise_on_goto=None, goto_error=None):
+    def __init__(self, values, raise_on_goto=None, goto_error=None,
+                 has_password_field=False, locator_error=None):
         self._values = list(values)
         self.goto_calls: list[str] = []
         self._raise_on_goto = raise_on_goto
         self._goto_error = goto_error
+        self._has_password_field = has_password_field
+        self._locator_error = locator_error
+        self.filled: dict[str, str] = {}
+        self.clicked: list[str] = []
 
     def goto(self, url, **kwargs):
         self.goto_calls.append(url)
@@ -225,6 +254,16 @@ class FakePage:
         if self._raise_on_goto:
             raise self._raise_on_goto
         return self._values.pop(0) if self._values else None
+
+    def locator(self, selector):
+        if self._locator_error is not None:
+            raise self._locator_error
+        if "password" in selector and not self._has_password_field:
+            # 表单不可见时返回 count()==0 的桩（选择器仍原样传，便于断言）
+            return FakeLocator(self, selector + ":hidden")
+        # text 输入框 / submit 按钮 / 可见的 password 框都返回桩，
+        # 只有真的走到了 try_chat_login 才会被 fill/click。
+        return FakeLocator(self, selector)
 
     def wait_for_timeout(self, ms):
         return None
@@ -285,6 +324,68 @@ def test_extract_jwt_returns_none_when_token_never_appears():
     page = FakePage([None] * 40)
 
     assert extract_jwt(page, "vpn-12-o2-chat.ujn.edu.cn") is None
+
+
+# --- ChatUJN 应用层登录（实测 2026-09-16：SSO 过期后要显式登录）--------------
+
+def test_extract_jwt_performs_explicit_login_when_password_field_appears():
+    """【关键回归】ChatUJN 静默 SSO 过期后，应用页跳 /auth 要求账号密码。
+
+    此时必须用 config 凭据登一次，token 才会出现。实测：填表提交后 1s 内
+    token 出现。原实现只等 token，等不到就告警放弃 -> 代理拿旧 JWT 打上游
+    -> 上游弹登录页 HTML -> 500，且重启救不回来（每次登录脚本跑完都没 JWT）。
+    """
+    from ujn_webvpn_login import extract_jwt
+
+    # 轮询序列：先没 token（此时密码框出现）-> 登录 -> token 出现
+    page = FakePage([None, None, SAMPLE_JWT], has_password_field=True)
+
+    got = extract_jwt(
+        page, "vpn-12-o2-chat.ujn.edu.cn", username="stu01", password="pw"
+    )
+
+    assert got == SAMPLE_JWT
+    # 表单被真实填写：用户名进了 text 框、密码进了 password 框、点了提交
+    assert page.filled.get("input[type='text']") == "stu01"
+    assert page.filled.get("input[type='password']") == "pw"
+    assert "button[type='submit']" in page.clicked
+
+
+def test_extract_jwt_login_form_error_does_not_crash():
+    """表单填写抛异常（页面改版）时只告警，不能让登录失败。"""
+    from ujn_webvpn_login import extract_jwt
+
+    page = FakePage([SAMPLE_JWT], has_password_field=True,
+                    locator_error=RuntimeError("selector gone"))
+
+    assert extract_jwt(
+        page, "vpn-12-o2-chat.ujn.edu.cn", username="u", password="p"
+    ) == SAMPLE_JWT
+
+
+def test_extract_jwt_no_credentials_skips_login_but_still_finds_token():
+    """没传凭据（老调用方式）不该崩 —— 表单出现也只是不登，等超时。"""
+    from ujn_webvpn_login import extract_jwt
+
+    page = FakePage([SAMPLE_JWT], has_password_field=True)
+
+    # 凭据为空时不应尝试填写
+    got = extract_jwt(page, "vpn-12-o2-chat.ujn.edu.cn")
+    assert got == SAMPLE_JWT
+    assert not page.clicked, "空凭据不该提交表单"
+
+
+def test_extract_jwt_does_not_login_twice():
+    """登录提交过一次后，同一轮询里不再重复提交（避免连续打两次表单）。"""
+    from ujn_webvpn_login import extract_jwt
+
+    # token 很晚才出现，期间密码框一直"在"——但只应提交一次
+    page = FakePage([None, None, None, None, SAMPLE_JWT], has_password_field=True)
+
+    extract_jwt(page, "vpn-12-o2-chat.ujn.edu.cn", username="u", password="p")
+
+    submit_clicks = [c for c in page.clicked if "submit" in c]
+    assert len(submit_clicks) == 1
 
 
 def test_extract_jwt_rejects_noise_values_seen_in_the_real_dump():

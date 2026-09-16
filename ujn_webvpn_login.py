@@ -176,7 +176,31 @@ def wait_for_login(page) -> bool:
     return not is_login_page(page)
 
 
-def extract_jwt(page, host_query: str) -> str | None:
+def try_chat_login(page, username: str, password: str) -> bool:
+    """在 ChatUJN 自己的 /auth 登录页上提交智慧计大账号。
+
+    返回 True 表示表单已提交（不代表登录成功 —— 成功与否由外层轮询
+    token 是否出现判断）。任何异常都吞掉返回 False：这里失败只意味着
+    "这次没掏到 JWT"，绝不能让登录脚本以非零退出。
+
+    实测表单结构（2026-09-16）：input[type=text] + input[type=password]
+    + button[type=submit]，双模式按钮（智慧计大 / 本地账号），默认即账号密码。
+    """
+    try:
+        page.locator("input[type='text']").first.fill(username, timeout=3000)
+        page.locator("input[type='password']").first.fill(password, timeout=3000)
+        page.locator("button[type='submit']").first.click(timeout=3000)
+        return True
+    except Exception as exc:
+        print(
+            f"  警告：ChatUJN 登录表单填写失败（{type(exc).__name__}），"
+            f"可能是页面改版",
+            file=sys.stderr,
+        )
+        return False
+
+
+def extract_jwt(page, host_query: str, username: str = "", password: str = "") -> str | None:
     """走到 chat 应用页，把 JWT 掏出来。
 
     返回 None 表示这次没掏到（上游改版、主机名缺失、页面没等到），
@@ -192,6 +216,12 @@ def extract_jwt(page, host_query: str) -> str | None:
     为什么不用 context.storage_state() 拿：
     它是 JS 设的 session cookie，不进 Playwright 的 cookie jar，
     storage_state() 里【不会】有它。
+
+    应用层的第二道登录（实测 2026-09-16 才暴露）：WebVPN 会话有效 ≠ ChatUJN
+    已登录。ChatUJN 的静默 SSO 过期后，应用页跳到自己的 /auth 要求显式输入
+    智慧计大账号 —— 此时既没有 token cookie，代理打上游也会被弹回登录页
+    HTML（LiteLLM 解 JSON 失败 -> 500）。所以这里要在密码框出现时
+    用 config.yaml 的凭据再登一次。
     """
     app_root = webvpn_app_root(host_query)
     if not app_root:
@@ -213,7 +243,12 @@ def extract_jwt(page, host_query: str) -> str | None:
 
     # 轮询而不是死等满。每次 evaluate 都要 try：应用页会自己跳 /auth，
     # 跳转瞬间执行上下文被销毁，evaluate 会抛 "Execution context was destroyed"。
-    # 那不是错误，等页面稳定后重试即可 —— 实测 token 在跳转前后都在。
+    # 那不是错误，等页面稳定后重试即可。
+    #
+    # 轮询中还可能发现"需要显式登录"（ChatUJN 自己的 /auth 登录页）——
+    # 那就用应用凭据登一次再继续等。SvelteKit 客户端路由下表单渲染晚于
+    # domcontentloaded，所以"等表单"必须发生在同一轮询里，不能一次性判断。
+    logged_in = False
     for _ in range(JWT_WAIT_MS // 500):
         try:
             jwt = page.evaluate(FIND_JWT_JS)
@@ -221,6 +256,18 @@ def extract_jwt(page, host_query: str) -> str | None:
             jwt = None
         if jwt and looks_like_jwt(jwt):
             return jwt
+
+        if (
+            not logged_in
+            and username
+            and password
+            and page.locator("input[type='password']").count() > 0
+        ):
+            if try_chat_login(page, username, password):
+                logged_in = True
+            # 登录失败（凭据错/表单变了）不 return —— 继续轮询到超时，
+            # 万一表单其实提交成功了，token 还是能掏到。
+
         try:
             page.wait_for_timeout(500)
         except Exception:
@@ -335,7 +382,12 @@ def main() -> None:
             # 上游签发新 token 后沿用旧的，正是最难排查的那类失效。
             jwt = None
             if not args.no_jwt:
-                jwt = extract_jwt(page, config.get("webvpn_host_query", ""))
+                jwt = extract_jwt(
+                    page,
+                    config.get("webvpn_host_query", ""),
+                    username=config.get("username", ""),
+                    password=config.get("password", ""),
+                )
 
             effective = save_state(context, state_file, jwt)
             print(f"Saved session state to: {state_file.resolve()}")

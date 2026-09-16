@@ -15,9 +15,6 @@
         "1.Qwen3.5-27B": {
           "name": "1.Qwen3.5-27B"
         },
-        "Qwen3.6-27B": {
-          "name": "Qwen3.6-27B"
-        },
         "GLM-5.3-Flash": {
           "name": "GLM-5.3-Flash"
         },
@@ -26,6 +23,12 @@
         },
         "/models/Qwen3.8-Flash-Next": {
           "name": "/models/Qwen3.8-Flash-Next"
+        },
+        "Qwen3.8-27B": {
+          "name": "Qwen3.8-27B"
+        },
+        "Qwen3.6-27B": {
+          "name": "Qwen3.6-27B"
         }
       }
     }

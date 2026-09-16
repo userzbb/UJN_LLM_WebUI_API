@@ -110,9 +110,16 @@ function Test-ProxyUpstream {
       探测运行中的代理能否真的打到上游。返回值：
         ok      正常
         dead    连不上/超时 —— 代理进程挂了或网络不通（无状态码）
-        session 401/403/502/503 —— WebVPN 会话失效，要换新 Cookie 并重启
+        session 401/403/502/503，或「500 + 响应体是登录页 HTML」
         config  400 —— 多半是探测用的模型名有问题，重启无用
         unknown 其它
+
+      为什么要看 500 的响应体（实测 2026-09-16）：WebVPN/ChatUJN 会话失效时
+      上游返回的是登录页 HTML，LiteLLM 解析 JSON 失败后对外表现为 500 ——
+      状态码上与"上游内部错误"无法区分。不区分的话会话失效型 500 落进
+      unknown，守护什么都不做，代理永远坏着；但也不能见 500 就重登
+      （上游偶发内部错误很常见，会陷入重启风暴）。
+      判据：响应体含 <!DOCTYPE html（登录页必然是 HTML，JSON 错误不会是）。
 
       dead / session 都会触发重启（代理进程本身可能是坏的），
       但【只有 session 会重新登录换凭据】—— 见守护循环里的说明。
@@ -144,6 +151,25 @@ function Test-ProxyUpstream {
         if ($status -eq 400) { return "config" }
         if ($status -eq 401 -or $status -eq 403 -or $status -eq 502 -or $status -eq 503) {
             return "session"
+        }
+        if ($status -eq 500) {
+            # 会话失效型 500：上游把登录页 HTML 当响应体返回。
+            #
+            # 【必须读 ResponseStream 而不是 ErrorDetails.Message】——
+            # 实测（mock 500+HTML）：ErrorDetails.Message 是 PowerShell 把 HTML
+            # 解析后提取的【可见文本】（"tpass sso login required"），
+            # <!DOCTYPE 等标签被剥掉了，用它匹配必然漏判。
+            # ResponseStream 里才是原始 HTML。
+            $respBody = ""
+            try {
+                $s = $_.Exception.Response.GetResponseStream()
+                if ($s) {
+                    $s.Position = 0
+                    $reader = New-Object System.IO.StreamReader($s)
+                    $respBody = $reader.ReadToEnd()
+                }
+            } catch { }
+            if ($respBody -match "<!DOCTYPE html") { return "session" }
         }
         return "unknown"
     }

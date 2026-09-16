@@ -5,7 +5,8 @@
 models:
 - GLM-5.3
 - 1.Qwen3.5-27B
-- Qwen3.6-27B
 - GLM-5.3-Flash
 - deepseek-v4-flash
 - /models/Qwen3.8-Flash-Next
+- Qwen3.8-27B
+- Qwen3.6-27B
