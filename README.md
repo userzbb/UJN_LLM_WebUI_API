@@ -58,6 +58,12 @@ uv run playwright install chromium
 Copy-Item config.yaml.example config.yaml
 ```
 
+macOS / Linux：
+
+```sh
+cp config.yaml.example config.yaml
+```
+
 编辑 `config.yaml`：
 
 ```yaml
@@ -87,14 +93,18 @@ proxy:
 
 ```
 ujn_webvpn_login.py  ->  state.json { cookies, jwt }  ->  build_litellm_config.py  ->  litellm_config.yaml
+                     \-> config.yaml 的 api_key（回填兜底值）
 ```
 
 **凭据优先级**：`state.jwt` > `config.yaml` 的 `api_key`。
 两者都有且不同时脚本会在 stderr 告警，告诉你实际用的是哪一份。
 
-**`config.yaml` 的 `api_key` 建议填一份作为兜底**（而不是留空）：正常情况下
-自动提取的 JWT 会被优先使用，这个值用不到；但没跑过登录脚本、state 文件被删、
-或提取失败时，就靠它顶上。
+**`config.yaml` 的 `api_key` 会被登录脚本自动回填**，不用你手抄：每次登录成功后，
+`ujn_webvpn_login.py` 会把当次生效的 JWT 一并写回 `config.yaml` 的 `api_key`
+（**只改那一行**，你的注释和缩进都保留；已经是最新值时不重复写）。
+
+它仍然是**兜底**用途 —— 正常情况下优先用的是 `state.jwt`，这个值用不到；
+但没跑过登录脚本、state 文件被删、或提取失败时，就靠它顶上。
 
 > 🔍 **怎么确认填对了：** 该 JWT 的载荷只含一个用户 UUID，且**没有 `exp` 字段**
 > ——也就是说它本身不会过期，失效只发生在你主动登出或上游清理会话时。
@@ -103,8 +113,9 @@ ujn_webvpn_login.py  ->  state.json { cookies, jwt }  ->  build_litellm_config.p
 > ⚠ **不要把 JWT 或 Cookie 发给任何人。** 它的签名部分足以冒充你调用上游接口。
 > 一旦泄露，去 ChatUJN 登出重登即可作废。
 
-手工提取（仅在自动路径失效、需要核对时）：登录 ChatUJN 后按 F12 → Console 里执行
-`document.cookie`，复制 `token=` 后面的值填进 `api_key`。
+手工提取（**只在自动回填失效、需要核对时**才用）：登录 ChatUJN 后按 F12 → Console
+里执行 `document.cookie`，复制 `token=` 后面的值填进 `api_key`。
+正常情况下这一步用不着 —— 登录脚本每次都会自动回填。
 
 > 📌 **JWT 在哪：** 它在名为 `token` 的 **cookie** 里，**不在 localStorage**。
 > 用浏览器控制台 dump `localStorage` 会看到一堆 `__2___3___2..._token` 的混淆键，
@@ -157,6 +168,8 @@ https://webvpn.ujn.edu.cn/https/<opaque>/api/chat/completions?vpn-12-o2-chat.ujn
 
 ## 一键启动
 
+Windows（PowerShell）：
+
 ```powershell
 .\run.ps1
 ```
@@ -167,7 +180,35 @@ https://webvpn.ujn.edu.cn/https/<opaque>/api/chat/completions?vpn-12-o2-chat.ujn
 powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-`run.ps1` 会：
+macOS / Linux：
+
+```sh
+./run.sh
+```
+
+`run.sh` 只用 POSIX sh 语法，**sh / bash / zsh 下都能跑**（macOS 自带的 bash
+还停在 2007 年的 3.2，而 zsh 又是 macOS 默认 shell，所以刻意避开了两边的方言）：
+
+```sh
+./run.sh          # 有执行位，直接跑
+zsh run.sh        # 指定解释器也一样
+sh run.sh
+```
+
+两个脚本行为完全一致 —— `run.ps1` 与 `run.sh` 是对等移植，守护策略、
+端口冲突处理、探测状态机、退避逻辑都一样。参数在 `run.ps1` 里是命令行开关，
+在 `run.sh` 里换成环境变量：
+
+| `run.ps1` | `run.sh` | 默认 |
+|---|---|---|
+| `-Port 4000` | `UJN_PORT=4000` | 4000 |
+| `-ProbeSeconds 60` | `UJN_PROBE_SECONDS=60` | 60 |
+| `-RefreshSeconds 1800` | `UJN_REFRESH_SECONDS=1800` | 1800 |
+| `-MaxLoginAttempts 3` | `UJN_MAX_LOGIN_ATTEMPTS=3` | 3 |
+
+例：`UJN_PORT=4001 ./run.sh`。完整说明见 `./run.sh --help`。
+
+启动脚本会：
 
 1. 先做一次 headless WebVPN 登录刷新（最多 3 次）。
 2. 读 Cookie 与 JWT 生成 `litellm_config.yaml`。
@@ -187,13 +228,20 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 > 抖动期间大概率也失败，只会白白拖慢恢复。
 
 > ⚠ **LiteLLM 只在启动时读取一次 `litellm_config.yaml`。** 后台刷新了 Cookie 后，
-> 需要**重启 `run.ps1`** 才会生效。这是实测结论：运行中修改文件里的 Cookie，
+> 需要**重启启动脚本**才会生效。这是实测结论：运行中修改文件里的 Cookie，
 > 服务仍会用旧值请求上游。
 
 验证：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:4000/health/liveliness
+uv run python tests/smoke_test.py
+```
+
+macOS / Linux：
+
+```sh
+curl http://127.0.0.1:4000/health/liveliness
 uv run python tests/smoke_test.py
 ```
 
@@ -286,19 +334,41 @@ setx UJN_DUMMY_KEY "dummy"
 若开了系统代理或梯子（Clash / FlClash / v2ray 等），**代理会让本项目坏掉**。
 `NO_PROXY` 按主机名匹配、**不区分端口**，写 `127.0.0.1` 就覆盖了它的所有端口（含 4000）。
 
+Windows：
+
 ```powershell
 $env:NO_PROXY = "localhost,127.0.0.1,::1,.ujn.edu.cn"
 ```
 
-> Windows 的环境变量**不区分大小写**，`NO_PROXY` 与 `no_proxy` 是同一个变量，
-> 设一行即可。（Linux/macOS 上才是两个独立变量，需分别设置。）
+macOS / Linux：
 
-**建议加进 PowerShell profile**（`$PROFILE`），这样新开的终端都自动生效：
+```sh
+export NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
+export no_proxy="localhost,127.0.0.1,::1,.ujn.edu.cn"   # ← 两个都要设，见下
+```
+
+> Windows 的环境变量**不区分大小写**，`NO_PROXY` 与 `no_proxy` 是同一个变量，
+> 设一行即可。
+>
+> Linux/macOS 上它们是**两个互相独立的变量**，各库认哪个不一定（curl 只认小写，
+> Python `requests` 两个都认）。**只设大写会让 curl 那条路继续走代理。**
+> `run.sh` 两个都会设，手工配置时也别漏。
+
+**建议加进 shell 启动文件**，这样新开的终端都自动生效：
 
 ```powershell
+# PowerShell profile（$PROFILE）
 $env:HTTP_PROXY="http://127.0.0.1:7897"     # 你的代理
 $env:HTTPS_PROXY="http://127.0.0.1:7897"
 $env:NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
+```
+
+```sh
+# ~/.zshrc 或 ~/.bashrc
+export HTTP_PROXY="http://127.0.0.1:7897"   # 你的代理
+export HTTPS_PROXY="http://127.0.0.1:7897"
+export NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
+export no_proxy="$NO_PROXY"
 ```
 
 #### 为什么必须设：两条腿都会断
@@ -314,9 +384,9 @@ $env:NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
 - `::1` 是 IPv6 回环，**不能漏**：客户端有时按 IPv6 写法连本机，漏掉会时好时坏。
 - `.ujn.edu.cn` 是校园网后缀，实测直连 TLSv1.3 仅 0.2s，本就不需要代理。
 
-`run.ps1` 会自己设置这份清单（并**合并**你已有的值，不会覆盖），
+`run.ps1` / `run.sh` 会自己设置这份清单（并**合并**你已有的值，不会覆盖），
 所以它自己和它启动的 LiteLLM 子进程一定安全；但它管不到独立启动的客户端，
-客户端那条腿靠上面的 profile。
+客户端那条腿靠上面的启动文件。
 
 > ⚠ 若代理软件跑在 **TUN / 全局模式**，它可能无视 `NO_PROXY` 直接劫持流量 ——
 > 那种情况要在代理软件里为 `127.0.0.1`、`*.ujn.edu.cn` 配直连规则。
@@ -374,7 +444,7 @@ uv run python build_litellm_config.py --list-upstream
 ### 模型清单会自动同步（上游随时下线模型）
 
 `build_litellm_config.py` 生成配置前会**自动拉一次上游清单**更新 `models.yaml`
-（`run.ps1` 每 30 分钟刷新与每次按需重启都会走这条路，所以最多滞后 30 分钟）。
+（`run.ps1` / `run.sh` 每 30 分钟刷新与每次按需重启都会走这条路，所以最多滞后 30 分钟）。
 新增/下线的模型都会打印出来；**拉取失败不阻断**，沿用本地清单继续生成。
 
 > ⚠ 自动同步只更新**代理侧**。你客户端配置里写死的模型名（如
@@ -443,7 +513,7 @@ litellm_params:
 
 **`Model not found`**
 → 上游模型下线了。`build_litellm_config.py` 生成配置时会自动同步清单
-（`run.ps1` 每 30 分钟也会走一次）—— 但**你客户端里写死的模型名不会自动变**，
+（`run.ps1` / `run.sh` 每 30 分钟也会走一次）—— 但**你客户端里写死的模型名不会自动变**，
 按报错里的模型名到 `clients/` 范本里找替代，抄回客户端配置。
 
 **启动崩溃 `UnicodeDecodeError: 'gbk' codec`**
@@ -458,8 +528,10 @@ uv run python ujn_webvpn_login.py --headless
 .\run.ps1
 ```
 
+macOS / Linux 把最后一行换成 `./run.sh`。
+
 **`401 Unauthorized`**
-→ JWT 令牌被拒（通常是登出过、或上游清理了会话）。`run.ps1` 会按需重新登录并重启；
+→ JWT 令牌被拒（通常是登出过、或上游清理了会话）。启动脚本会按需重新登录并重启；
 手工排查时重跑一次登录脚本刷新 JWT：
 
 ```powershell
@@ -488,7 +560,7 @@ uv run python build_litellm_config.py
 | 症状 | 断掉的链路 | 在哪修 |
 |---|---|---|
 | 客户端报 `Connection failed` / `ConnectError 10061` | 客户端 → 本机 4000 | 客户端所在环境要设 `NO_PROXY` |
-| 上游请求全部 `500` | LiteLLM → webvpn | `run.ps1` 已自动处理 |
+| 上游请求全部 `500` | LiteLLM → webvpn | `run.ps1` / `run.sh` 已自动处理 |
 
 两种都靠 `NO_PROXY` 覆盖本机与校园网地址，详见上文「代理：让本机与校园网直连」：
 
@@ -496,7 +568,13 @@ uv run python build_litellm_config.py
 $env:NO_PROXY = "localhost,127.0.0.1,::1,.ujn.edu.cn"
 ```
 
-最省事的做法是加进 PowerShell profile（`$PROFILE`），这样所有终端程序一起好。
+```sh
+export NO_PROXY="localhost,127.0.0.1,::1,.ujn.edu.cn"
+export no_proxy="localhost,127.0.0.1,::1,.ujn.edu.cn"   # macOS/Linux 两个都要设
+```
+
+最省事的做法是加进 shell 启动文件（PowerShell 的 `$PROFILE`，或 `~/.zshrc` /
+`~/.bashrc`），这样所有终端程序一起好。
 注意改完要**重开终端**（以及重开客户端）才会生效。
 
 若代理软件跑在 TUN/全局模式，它可能无视 `NO_PROXY` 直接劫持流量 ——
@@ -515,7 +593,14 @@ uv run python build_litellm_config.py
 
 **`run.ps1` 报语法错误 `unexpected }`**
 → 脚本必须存为带 BOM 的 UTF-8。仓库里的文件已带 BOM；若你手工编辑后报错，
-用支持 BOM 的编辑器另存为「UTF-8 带 BOM」。
+用支持 BOM 的编辑器另存为「UTF-8 带 BOM」。（`run.sh` 没有这个约束。）
+
+**`./run.sh: Permission denied`**
+→ 执行位没保留（某些压缩包/同步工具会丢）。补上即可：
+
+```sh
+chmod +x run.sh
+```
 
 ---
 

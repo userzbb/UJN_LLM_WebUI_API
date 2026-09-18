@@ -439,6 +439,98 @@ def test_run_script_merges_rather_than_overwrites_no_proxy():
     )
 
 
+# --- run.sh（macOS / Linux）的 NO_PROXY ---------------------------------------
+#
+# 清单此时有两份（run.ps1 与 run.sh），比单份更容易腐坏 —— 下面除了各自
+# 覆盖面的断言，还有一条专门钉「两份不许漂移」。
+
+def _no_proxy_entries_from_run_sh() -> list[str]:
+    """解析 run.sh 里【真正生效】的那份 NO_PROXY 清单。
+
+    同 run.ps1 的理由见上面那条测试：清单在脚本里，不在 Python 常量里。
+    `_merged` 之后还会被赋成 "$_merged,$_item"（并既有值），所以只取
+    第一个、且不含 $ 的字面量 —— 那才是初始清单。
+    """
+    import re
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
+    match = re.search(r'^\s*_merged="([^"$]*)"', script, re.MULTILINE)
+    assert match, 'run.sh 里找不到 _merged="..." 的 NO_PROXY 清单'
+    return [e.strip() for e in match.group(1).split(",") if e.strip()]
+
+
+def test_run_sh_no_proxy_covers_ujn_and_both_loopbacks():
+    """run.sh 与 run.ps1 是同一类故障的两个入口，覆盖面必须一致。"""
+    entries = _no_proxy_entries_from_run_sh()
+
+    assert ".ujn.edu.cn" in entries, f"run.sh 的 NO_PROXY 缺 .ujn.edu.cn: {entries}"
+    assert "localhost" in entries
+    assert "127.0.0.1" in entries
+    assert "::1" in entries
+
+
+def test_run_sh_and_run_ps1_share_the_same_no_proxy_list():
+    """两个脚本的清单不许漂移。
+
+    上一条提交把 NO_PROXY 从 Python 常量改成「直接解析生效的 run.ps1」，
+    防的是"测试钉着副本、真正生效的那份写错了也照样通过"。同一种危险现在
+    变成了两份：改了 run.ps1 忘了 run.sh（或反过来），谁都不会发现。
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    ps1 = (root / "run.ps1").read_text(encoding="utf-8")
+    match = re.search(r"^\s*\$parts\s*=\s*@\(([^)]*)\)", ps1, re.MULTILINE)
+    assert match, "run.ps1 里找不到 $parts = @(...) 的 NO_PROXY 清单"
+
+    from_ps1 = {
+        e.strip().strip('"').strip("'")
+        for e in match.group(1).split(",")
+        if e.strip()
+    }
+    assert from_ps1 == set(_no_proxy_entries_from_run_sh()), (
+        "run.ps1 与 run.sh 的 NO_PROXY 清单已漂移 —— 两边都要覆盖同样的主机"
+    )
+
+
+def test_run_sh_merges_rather_than_overwrites_no_proxy():
+    """不能直接赋值 —— 会盖掉用户 shell 启动文件里已有的例外。"""
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
+
+    assert "${NO_PROXY:-}" in script and "${no_proxy:-}" in script, (
+        "应把用户已有的 NO_PROXY / no_proxy 并入后再写回"
+    )
+
+
+def test_run_sh_sets_both_no_proxy_spellings():
+    """run.sh 必须【两个拼写都设】—— 与 run.ps1 的要求恰好相反。
+
+    Linux/macOS 上 NO_PROXY 与 no_proxy 是两个互相独立的变量，各库认哪个
+    不一定（curl 只认小写，Python requests 两个都认）。只设大写，curl 那条路
+    仍会被系统代理接管。
+
+    这条同时是防「照抄 run.ps1 的注释来清理」：run.ps1 里明写着
+    「不要再写 no_proxy」，但那是 Windows 专属结论（环境变量不区分大小写），
+    搬到 run.sh 就把功能弄坏了。
+    """
+    import re
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "run.sh").read_text(encoding="utf-8")
+    code = "\n".join(
+        line for line in script.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert re.search(r'^\s*NO_PROXY="\$_merged"', code, re.MULTILINE), "缺 NO_PROXY 赋值"
+    assert re.search(r'^\s*no_proxy="\$_merged"', code, re.MULTILINE), (
+        "run.sh 必须同时设 no_proxy —— Linux/macOS 上它与 NO_PROXY 是两个独立变量"
+    )
+
+
 def test_client_templates_are_not_polluted_by_ujn_suffix():
     """客户端范本里的 NO_PROXY 只服务"连本机 4000"，别混进 .ujn.edu.cn。
 
