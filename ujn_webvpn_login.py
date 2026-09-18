@@ -2,6 +2,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -308,6 +309,106 @@ def save_state(context, state_file: Path, jwt: str | None) -> None:
     return effective
 
 
+_API_KEY_LINE_RE = re.compile(r"^(\s*)api_key\s*:")
+_BARE_PROXY_LINE_RE = re.compile(r"^(\s*)proxy\s*:(?:\s*(?:#.*)?)$")
+
+
+def _api_key_tail(rest: str) -> str | None:
+    """给定 `api_key:` 之后的原文，返回「值之后」那段（含空白与行尾注释）。
+
+    只用来保留格式，不解析值本身 —— 回填的值是覆盖写，读旧值没意义。
+
+    引号优先：YAML 里只有前面是空白的 `#` 才起注释作用，所以 `"a#b"` 里的
+    `#` 是值的一部分。逐字符扫到第一个「有效」的 `#` 会把它误当注释，
+    把值截成 `"a` —— 这正是本函数存在的理由。
+
+    引号没闭合时返回 None：宁可不改，也不要写坏用户的文件。
+    """
+    # 值【前面】的空白不要：调用方写死 `api_key: `，再带上就会多一个空格。
+    # 值【后面】的空白要：那是用户的对齐或行尾注释前的间隔，得原样留着。
+    text = rest.lstrip()
+
+    if text[:1] in ('"', "'"):
+        end = text.find(text[0], 1)
+        if end == -1:
+            return None
+        return text[end + 1 :]
+
+    end = len(text)
+    for i, ch in enumerate(text):
+        if ch == "#" and (i == 0 or text[i - 1].isspace()):
+            end = i
+            break
+    # 值末尾的空白归到尾巴里，原样保留
+    while end > 0 and text[end - 1].isspace():
+        end -= 1
+    return text[end:]
+
+
+def render_api_key(text: str, jwt: str) -> str:
+    """把 jwt 写进 config.yaml 文本的 api_key，返回新文本。
+
+    逐行改，绝不重新 dump 整份文件：config.yaml 是用户手写的，有注释和
+    缩进习惯，yaml.safe_dump 会把它们全抹平。（生成 litellm_config.yaml 时
+    才用 dump —— 那是纯生成物，两回事。）
+
+    找不到 api_key 时就地插入：proxy: 是空块就插进它下面，否则在文件末尾
+    补一行顶层 api_key —— read_yaml_scalar 递归查找，顶层一样读得到。
+    """
+    lines = text.split("\n")
+
+    for i, line in enumerate(lines):
+        m = _API_KEY_LINE_RE.match(line)
+        if not m:
+            continue
+        tail = _api_key_tail(line[m.end() :])
+        if tail is None:
+            continue  # 这行写得没法安全替换，跳过，继续找下一处
+        lines[i] = f'{m.group(1)}api_key: "{jwt}"{tail}'
+        return "\n".join(lines)
+
+    for i, line in enumerate(lines):
+        m = _BARE_PROXY_LINE_RE.match(line)
+        if not m:
+            continue
+        lines.insert(i + 1, f'{m.group(1)}  api_key: "{jwt}"')
+        return "\n".join(lines)
+
+    block = f'api_key: "{jwt}"'
+    if not text.strip():
+        return block + "\n"
+    return text.rstrip("\n") + "\n" + block + "\n"
+
+
+def write_back_api_key(config_file: Path, jwt: str) -> bool:
+    """把 jwt 回填进 config.yaml 的 api_key；失败只返回 False，不抛异常。
+
+    回填的是「本次实际生效的 JWT」（save_state 的返回值），不是刚掏到的那个：
+    抽取失败时会沿用上一次的值，写 effective 才不会让 state 与 config.yaml
+    分叉出 load_api_key 那条「两份不一致」的告警。
+
+    失败不抛：这只是让兜底值跟上，不该把一次成功的登录变成非零退出 ——
+    那样 run 脚本会判定登录失败并重试/退避，而 Cookie 和 JWT 其实都拿到了。
+    """
+    try:
+        text = config_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"  警告：读不到 {config_file}，跳过 api_key 回填（{exc}）", file=sys.stderr)
+        return False
+
+    updated = render_api_key(text, jwt)
+    if updated == text:
+        # 已经是最新值。别白写一次 —— 否则每 30 分钟动一次这个文件的 mtime。
+        return True
+
+    try:
+        config_file.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        print(f"  警告：写不回 {config_file}，api_key 未更新（{exc}）", file=sys.stderr)
+        return False
+    return True
+
+
 def save_debug_artifacts(page, prefix: str) -> None:
     DEBUG_DIR.mkdir(exist_ok=True)
     safe_prefix = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in prefix)
@@ -402,6 +503,14 @@ def main() -> None:
                     f"（{effective[:30]}...）",
                     file=sys.stderr,
                 )
+
+            # 回填 config.yaml 的 api_key。它只是兜底 —— load_api_key 的
+            # 优先级是 state.jwt > config.yaml，主力仍是 state 文件；
+            # 但它是用户看得见、能带走的那一份（state 删了就没了），
+            # 也省得用户照 README 自己开 DevTools 抄。
+            # 失败不必另报错：write_back_api_key 自己会告警。
+            if effective and write_back_api_key(Path(args.config), effective):
+                print(f"api_key 已回填到 {args.config}")
 
         if not args.headless:
             print("Browser will stay open. Press Enter to close it.")

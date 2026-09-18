@@ -558,3 +558,147 @@ def test_load_proxy_settings_uses_state_jwt_end_to_end(tmp_path):
     # <opaque> 仍应被推导替换（这条路径与 JWT 无关，别被改坏）
     assert "<opaque>" not in settings["api_base"]
     assert "77726476706e69737468656265737421f3ff40886925625e300d8db9d6562d" in settings["api_base"]
+
+
+# --- api_key 回填（登录脚本把掏到的 JWT 写回 config.yaml）--------------------
+#
+# 背景：README 原来让用户自己开 DevTools 复制 `token=` 再手填 api_key。
+# 既然每次登录都能掏到 JWT，这一步没理由留给人。
+#
+# 回填的是「本次实际生效的 JWT」—— save_state 在抽取失败时沿用上一次的值，
+# 写它返回的 effective 才不会让 state 与 config.yaml 分叉出「不一致」告警。
+
+def test_render_api_key_replaces_the_existing_value():
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('proxy:\n  api_key: "stale"\n', SAMPLE_JWT)
+
+    assert out == f'proxy:\n  api_key: "{SAMPLE_JWT}"\n'
+
+
+def test_render_api_key_preserves_indent_and_trailing_comment():
+    """config.yaml 是用户手写的，缩进和行尾注释必须原样留着。"""
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('proxy:\n    api_key: "stale"   # 我的兜底 JWT\n', SAMPLE_JWT)
+
+    assert out == f'proxy:\n    api_key: "{SAMPLE_JWT}"   # 我的兜底 JWT\n'
+
+
+def test_render_api_key_handles_single_quoted_and_bare_values():
+    from ujn_webvpn_login import render_api_key
+
+    assert f'api_key: "{SAMPLE_JWT}"' in render_api_key("proxy:\n  api_key: 'stale'\n", SAMPLE_JWT)
+    assert f'api_key: "{SAMPLE_JWT}"' in render_api_key("proxy:\n  api_key: stale\n", SAMPLE_JWT)
+
+
+def test_render_api_key_keeps_a_hash_inside_a_quoted_value():
+    """回归：引号里的 # 不是注释 —— 偷懒的正则会把 `"a#b"` 截成 `"a`。"""
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('proxy:\n  api_key: "a#b"  # 注释\n', SAMPLE_JWT)
+
+    assert out == f'proxy:\n  api_key: "{SAMPLE_JWT}"  # 注释\n'
+
+
+def test_render_api_key_ignores_commented_and_lookalike_keys():
+    """`# api_key:` 与 `my_api_key:` 都不是这个键，不能动。"""
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('# api_key: "commented"\nproxy:\n  my_api_key: "other"\n', SAMPLE_JWT)
+
+    assert '# api_key: "commented"' in out
+    assert 'my_api_key: "other"' in out
+
+
+def test_render_api_key_inserts_under_proxy_when_missing():
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('username: "u"\nproxy:\n  webvpn_host_query: "h"\n', SAMPLE_JWT)
+
+    assert out == f'username: "u"\nproxy:\n  api_key: "{SAMPLE_JWT}"\n  webvpn_host_query: "h"\n'
+
+
+def test_render_api_key_appends_when_there_is_no_proxy_section():
+    from ujn_webvpn_login import render_api_key
+
+    out = render_api_key('username: "u"\n', SAMPLE_JWT)
+
+    assert f'api_key: "{SAMPLE_JWT}"' in out
+    # 不能用 yaml.safe_dump 重排 —— 用户那一行必须原样还在
+    assert out.startswith('username: "u"\n')
+
+
+def test_render_api_key_is_idempotent():
+    """run 脚本每 30 分钟调一次登录，重复回填不能越填越乱。"""
+    from ujn_webvpn_login import render_api_key
+
+    once = render_api_key('proxy:\n  api_key: "stale"  # c\n', SAMPLE_JWT)
+
+    assert render_api_key(once, SAMPLE_JWT) == once
+
+
+def test_render_api_key_round_trips_through_the_reader():
+    """回填后的文件必须能被 build_litellm_config 的读取器读回同一个值。"""
+    from build_litellm_config import read_yaml_scalar
+    from ujn_webvpn_login import render_api_key
+
+    for text in (
+        'proxy:\n  api_key: "stale"\n',
+        "proxy:\n  api_key: 'stale'  # 注释\n",
+        'username: "u"\nproxy:\n  webvpn_host_query: "h"\n',
+        'username: "u"\n',
+    ):
+        assert read_yaml_scalar(render_api_key(text, SAMPLE_JWT), "api_key") == SAMPLE_JWT
+
+
+def test_write_back_api_key_updates_the_file_in_place(tmp_path):
+    from ujn_webvpn_login import write_back_api_key
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('username: "u"\nproxy:\n  api_key: "stale"  # 注释\n', encoding="utf-8")
+
+    assert write_back_api_key(cfg, SAMPLE_JWT) is True
+
+    text = cfg.read_text(encoding="utf-8")
+    assert SAMPLE_JWT in text
+    assert "# 注释" in text
+    assert 'username: "u"' in text
+
+
+def test_write_back_api_key_skips_the_write_when_already_current(tmp_path):
+    """已经是最新值就别白写 —— 否则每 30 分钟动一次 config.yaml 的 mtime。"""
+    from ujn_webvpn_login import write_back_api_key
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f'proxy:\n  api_key: "{SAMPLE_JWT}"\n', encoding="utf-8")
+    before = cfg.read_bytes()
+
+    assert write_back_api_key(cfg, SAMPLE_JWT) is True
+    assert cfg.read_bytes() == before
+
+
+def test_write_back_api_key_reports_failure_instead_of_raising(tmp_path):
+    """回填失败不能把一次成功的登录变成非零退出（脚本既有约定，见 main 顶部注释）。"""
+    from ujn_webvpn_login import write_back_api_key
+
+    assert write_back_api_key(tmp_path / "missing.yaml", SAMPLE_JWT) is False
+
+
+def test_render_api_key_preserves_spacing_around_a_bare_value():
+    """回归：只保留【值之后】的空白。
+
+    值【前面】那段分隔空白不能拼进尾巴 —— 调用方写死了 `api_key: `，
+    再带上就会多一个空格：`api_key: old  # c` 会变成 `... "JWT"   # c`。
+    """
+    from ujn_webvpn_login import render_api_key
+
+    assert render_api_key('proxy:\n  api_key: old  # c\n', SAMPLE_JWT) == (
+        f'proxy:\n  api_key: "{SAMPLE_JWT}"  # c\n'
+    )
+    assert render_api_key('proxy:\n  api_key: old   \n', SAMPLE_JWT) == (
+        f'proxy:\n  api_key: "{SAMPLE_JWT}"   \n'
+    )
+    assert render_api_key('proxy:\n  api_key:\n', SAMPLE_JWT) == (
+        f'proxy:\n  api_key: "{SAMPLE_JWT}"\n'
+    )
