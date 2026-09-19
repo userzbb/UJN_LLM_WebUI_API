@@ -9,17 +9,11 @@
         "apiKey": "dummy"
       },
       "models": {
-        "GLM-5.3": {
-          "name": "GLM-5.3"
-        },
         "1.Qwen3.5-27B": {
           "name": "1.Qwen3.5-27B"
         },
         "GLM-5.3-Flash": {
           "name": "GLM-5.3-Flash"
-        },
-        "deepseek-v4-flash": {
-          "name": "deepseek-v4-flash"
         },
         "/models/Qwen3.8-Flash-Next": {
           "name": "/models/Qwen3.8-Flash-Next"
@@ -29,6 +23,9 @@
         },
         "Qwen3.6-27B": {
           "name": "Qwen3.6-27B"
+        },
+        "deepseek-v41-flash": {
+          "name": "deepseek-v41-flash"
         }
       }
     }

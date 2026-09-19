@@ -62,12 +62,16 @@ function Update-LiteLlmConfig {
 }
 
 function Get-ProbeModel {
-    # 从 models.yaml 取第一个模型名，只用于探测上游是否还能打通。
-    $line = Select-String -Path (Join-Path $ProjectDir "models.yaml") `
-                          -Pattern '^\s*-\s*(\S.*?)\s*$' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    if (-not $line) { return $null }
-    return $line.Matches[0].Groups[1].Value.Trim('"', "'")
+    # 从 models.yaml 取【全部】模型名，用于轮询探测。
+    #
+    # 为什么探测全部而不是像以前那样只取第一个（2026-09-19 实测）：
+    # LiteLLM 的冷却按 deployment 独立计算，而这里每个模型各自只有一个
+    # deployment。只探测模型 A 时，模型 B 冷却完全看不见 —— 守护报 ok，
+    # 而客户端正在全挂。这正是 14:05-14:33 那批报错的成因：
+    # 探测用的 1.Qwen3.5-27B 一切正常，出问题的却是 deepseek-v41-flash。
+    (Select-String -Path (Join-Path $ProjectDir "models.yaml") `
+                   -Pattern '^\s*-\s*(\S.*?)\s*$' -ErrorAction SilentlyContinue |
+     ForEach-Object { $_.Matches[0].Groups[1].Value.Trim('"', "'") })
 }
 
 function Start-Proxy {
@@ -108,11 +112,18 @@ function Wait-ProxyUp {
 function Test-ProxyUpstream {
     <#
       探测运行中的代理能否真的打到上游。返回值：
-        ok      正常
-        dead    连不上/超时 —— 代理进程挂了或网络不通（无状态码）
-        session 401/403/502/503，或「500 + 响应体是登录页 HTML」
-        config  400 —— 多半是探测用的模型名有问题，重启无用
-        unknown 其它
+        ok       正常
+        dead     连不上/超时 —— 代理进程挂了或网络不通（无状态码）
+        session  401/403/502/503，或「500 + 响应体是登录页 HTML」
+        cooldown 429 —— LiteLLM 路由器把该模型打入冷却，该模型全线不可用
+        config   400 —— 多半是探测用的模型名有问题，重启无用
+        unknown  其它
+
+      【为什么用流式探测】（实测 2026-09-19，隔离实验）：上游返回登录页 HTML 时，
+        非流式 -> 500（下面的判据能认出来）
+        流式   -> 429 "No deployments available for selected model" + cooldown_list=[...]
+      两条路径的失败表现【不同】。Claude Code 全程走流式，所以只探非流式会
+      在客户端已经全挂时仍然报 ok。这里用 stream=$true，让探测与真实客户端同路。
 
       为什么要看 500 的响应体（实测 2026-09-16）：WebVPN/ChatUJN 会话失效时
       上游返回的是登录页 HTML，LiteLLM 解析 JSON 失败后对外表现为 500 ——
@@ -132,6 +143,7 @@ function Test-ProxyUpstream {
     $body = @{
         model      = $Model
         max_tokens = 1
+        stream     = $true
         messages   = @(@{ role = "user"; content = "ping" })
     } | ConvertTo-Json -Depth 5
 
@@ -152,6 +164,7 @@ function Test-ProxyUpstream {
         if ($status -eq 401 -or $status -eq 403 -or $status -eq 502 -or $status -eq 503) {
             return "session"
         }
+        if ($status -eq 429) { return "cooldown" }
         if ($status -eq 500) {
             # 会话失效型 500：上游把登录页 HTML 当响应体返回。
             #
@@ -173,6 +186,58 @@ function Test-ProxyUpstream {
         }
         return "unknown"
     }
+}
+
+function Test-ProxyUpstreamAll {
+    <#
+      轮询 models.yaml 里的每个模型探测一次，把结果聚合【一个】状态字。
+
+      聚合规则（严重度由高到低，返回最高的那个）：
+        session  > dead > cooldown > config > unknown > ok
+
+      为什么这样排序：
+        - session 要重新登录，代价最高但最可能真修好，优先级最高。
+        - dead 是进程/网络级，覆盖一切局部模型问题。
+        - cooldown / config / unknown 都是「部分模型有问题」，
+          只要还有模型是好的，就不该触发重启（避免重启风暴）。
+
+      关键：把所有模型的探测结果各自计数，只有「一个 ok 都没有」时才
+      把坏状态上报为故障。这样单个模型下线（上游常态）不会导致反复重启。
+    #>
+    param([int] $TimeoutSec = 45)
+
+    $sawOk = $false
+    $worst = "ok"
+    $worstRank = 0
+
+    foreach ($m in (Get-ProbeModel)) {
+        if (-not $m) { continue }
+        $s = Test-ProxyUpstream -Model $m -TimeoutSec $TimeoutSec
+        if ($s -eq "ok") { $sawOk = $true }
+
+        # 短路：dead / session 是【进程级 / 凭据级】的，对每个模型都一样，
+        # 没必要再探测剩下的。这很重要：最坏情况（litellm 接受连接但上游挂起）
+        # 每个探测要等满 TimeoutSec，逐个探完 6 个就是 270s，
+        # 会让守护循环远超 ProbeSeconds 而漂移。
+        # cooldown / config / unknown 是【单模型级】的，必须继续探完 ——
+        # 别的模型可能还是好的（那就该报 ok）。
+        if ($s -eq "dead" -or $s -eq "session") { return $s }
+
+        $r = switch ($s) {
+            "ok"       { 0 }
+            "cooldown" { 3 }
+            "config"   { 2 }
+            default    { 1 }
+        }
+        if ($s -ne "ok" -and $r -gt $worstRank) { $worst = $s; $worstRank = $r }
+    }
+
+    if ($sawOk) {
+        # 还有模型是好的 —— 上游和凭据都没问题，不管局部模型状态。
+        return "ok"
+    }
+    if ($worstRank -eq 0) { return "config" }   # 一个模型名都没读到
+    return $worst
 }
 
 function Get-PortOwner {
@@ -343,16 +408,16 @@ if (-not (Invoke-WebVpnLogin -MaxAttempts $MaxLoginAttempts)) {
 Write-Stamp "生成 litellm_config.yaml..."
 if (-not (Update-LiteLlmConfig)) { throw "生成 litellm_config.yaml 失败" }
 
-$probeModel = Get-ProbeModel
-if (-not $probeModel) {
+$probeModels = @(Get-ProbeModel)
+if ($probeModels.Count -eq 0) {
     Write-Warning "models.yaml 里没读到模型名 —— 健康探测会跳过重启逻辑。"
 } else {
-    Write-Stamp "探测用模型: $probeModel"
+    Write-Stamp "探测用模型: 全部 $($probeModels.Count) 个（每轮逐个探测，聚合判定）"
 }
-# 注意：$probeModel 只是启动时的初始值。models.yaml 会被自动同步更新
+# 注意：这里只是启动时的摘要。models.yaml 会被自动同步更新
 # （build 脚本生成配置前会拉上游清单，上游随时可能下线模型），探测模型
 # 若固定不重读，就会指向一个已下线的模型，探测永远 400 -> 守护误判。
-# 所以守护循环里每轮探测前要重新 Get-ProbeModel。
+# 所以守护循环里每轮探测前要重新取 Get-ProbeModel。
 
 Write-Stamp "启动 LiteLLM 代理..."
 Start-Proxy
@@ -400,8 +465,9 @@ try {
 
         # 每轮重读：models.yaml 可能刚被自动同步改过（上游下线了探测模型时），
         # 固定用启动时那个值会让探测永远 400，守护误判成配置问题。
-        $probeModel = Get-ProbeModel
-        $state = Test-ProxyUpstream -Model $probeModel
+        # 探测【全部】模型：冷却按 deployment 独立计算，只探一个会漏掉
+        # 其他模型的故障（见 Test-ProxyUpstreamAll 的说明）。
+        $state = Test-ProxyUpstreamAll
 
         switch ($state) {
             "ok" {
@@ -421,6 +487,14 @@ try {
                     $script:BackoffSeconds = 0
                     $sinceRefresh = 0
                 }
+            }
+            "cooldown" {
+                # 全部模型都处于 LiteLLM 冷却 —— 上游/凭据可能还有效，
+                # 但路由器已把每个 deployment 打入冷却，客户端全线不可用。
+                # 只重启进程即可让路由器状态清零，【不要】重新登录：
+                # 冷却不代表凭据失效，重登既慢又可能再次失败而触发退避。
+                Write-Warning "全部模型处于冷却（LiteLLM 路由器），重启进程以清空状态..."
+                if (Restart-Proxy -FreshCookie $false) { $script:BackoffSeconds = 0 }
             }
             "config" {
                 Write-Warning "探测请求被拒（可能是模型名问题），不重启。检查 models.yaml。"

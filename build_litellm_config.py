@@ -249,12 +249,20 @@ def build_target_url(api_base: str, host_query: str) -> str:
 # 范本从 models.yaml 派生，避免手写后与真实模型清单漂移（历史上就漂移过：
 # ccswitch.json 缺了 FABLE 档与 [1M] 后缀，opencode.json 少一个模型）。
 
-# 四档默认值。两个都是实测最快且 1M 上下文的模型。
-# 注意：上游会下线模型（deepseek-v41-flash 已于 2026-09 被禁用）。
-# 这里填的值失效时，pick_tier_models 会退回 models.yaml 的第一个 ——
-# 那个模型未必也是 1M 的，所以 preferred 尽量保持指向现役的 1M 模型。
-TIER_FABLE  = "deepseek-v4-flash"
-TIER_OPUS   = "deepseek-v4-flash"
+# 四档默认值。都是实测最快且 1M 上下文的模型。
+#
+# 【上游会改名/下线模型，改写这里之前先跑 --list-upstream 核对。】
+# 历史（这条注释就是为它而留）：
+#   - deepseek-v4-flash 被上游改名为 deepseek-v41-flash（2026-09-19 实测）。
+#     改名后 TIER_FABLE/OPUS 的旧值匹配不上，pick_tier_models 静默退回
+#     models[0]（当时是 1.Qwen3.5-27B），客户端默认档位被指到一个
+#     非预期的模型上 —— 且因为它是「合法」模型，不会报错，只是悄悄换了。
+#   - 这里填的值失效时，pick_tier_models 会退回 models.yaml 的第一个 ——
+#     那个模型未必也是 1M 的，所以 preferred 尽量保持指向现役的 1M 模型。
+#   - 顺带一提：更早的注释曾写「deepseek-v41-flash 已于 2026-09 被禁用」，
+#     现已失效 —— 上游又把它放回来了，且是当前的主力模型。
+TIER_FABLE  = "deepseek-v41-flash"
+TIER_OPUS   = "deepseek-v41-flash"
 TIER_SONNET = "GLM-5.3-Flash"
 TIER_HAIKU  = "GLM-5.3-Flash"
 
@@ -467,6 +475,45 @@ def render_config(settings: dict[str, str], cookie_header: str, models: list[str
             # 不加这条，Claude Code 的请求会 KeyError 'created_at'。
             "use_chat_completions_url_for_anthropic_messages": True,
             "merge_reasoning_content_in_choices": True,
+        },
+        # 路由器设置：防止「一次瞬时失败」变成「整个模型组不可用」。
+        #
+        # 背景（2026-09-19 实测）：每个模型只有【一个】deployment，所以 LiteLLM
+        # 的冷却机制一旦触发，该模型就是全线中断 —— 客户端拿到的是 429
+        # "No deployments available for selected model"，而不是 SSE 流。
+        # Claude Code 侧的表现为 "Streaming response ended before any complete
+        # data was received"（流上一个完整事件都没有）。
+        #
+        # 复现方式（隔离实验，非生产）：搭一个固定返回登录页 HTML 的伪上游，
+        #   非流式 -> 500
+        #   流式   -> 200 + 空 SSE 流（LiteLLM 吞掉了错误，不计数为失败）
+        # 注意：触发冷却的是【非流式】那条路的 500。流式失败不会触发冷却，
+        # 反而会返回一个「看起来成功」的空流 —— 这是另一个隐蔽问题。
+        # A/B 实测（伪上游固定返回 HTML，同一串请求）：
+        #   无 router_settings -> 非流式 500 之后，流式与非流式【全部 429】
+        #   有 router_settings -> 不再出现 429，失败如实报 500
+        "router_settings": {
+            # 极大值 = 事实上关闭冷却。理由：本项目的「真的挂了」由
+            # run.sh/run.ps1 的守护循环判定（session / dead），它比 LiteLLM 的
+            # 失败计数更准 —— 能区分「会话失效」和「网络抖动」，而 LiteLLM
+            # 只知道"失败了 N 次"。两套机制叠加时，LiteLLM 先冷却反而会掩盖
+            # 真实状态：守护探测到的是 429 而不是根因，且冷却期内重试根本不会发生。
+            "allowed_fails": 100,
+            # 万一仍然进入冷却，尽快恢复（默认值远大于此）。
+            "cooldown_time": 5,
+            # 不重试：显式设为 0。
+            #
+            # 曾经设过 2，现已撤销。原因：
+            # 1) 性能。重试失败请求只会【增加】延迟，与本项目「流式、低延迟」的
+            #    目标相悖。用户明确要求性能优先。
+            # 2) 收益有限。上面 allowed_fails=100 已经让冷却基本不会触发，
+            #    重试要保护的那个场景本来就少了。
+            # 3) 未能验证。当时加它是基于一个后来被推翻的推测（误以为重试会在
+            #    流式响应里制造重复的 message_start —— 实为 grep 计数的假象，
+            #    正确计数后 message_start 只有 1 次）。既然它没被证明有用，
+            #    又不确定它是否与 "Content block not found" 中断有关，
+            #    就不该留在生产路径上。
+            "num_retries": 0,
         },
         "general_settings": {
             # 本机代理：不做鉴权。关掉鉴权的关键是 master_key 为 null

@@ -148,15 +148,20 @@ update_litellm_config() {
     uv run python "$BUILD_SCRIPT"
 }
 
-get_probe_model() {
-    # 从 models.yaml 取第一个模型名，只用于探测上游是否还能打通。
+get_probe_models() {
+    # 从 models.yaml 取【全部】模型名，逐行输出，用于轮询探测。
     #
     # 这个值【必须每轮重读】，不能只在启动时取一次：models.yaml 会被自动
     # 同步更新（build 脚本生成配置前会拉上游清单，上游随时可能下线模型），
     # 一旦探测用的模型下线，探测就永远 400，守护会误判成配置问题而不再重启。
+    #
+    # 为什么探测【全部】而不是像以前那样只取第一个（2026-09-19 实测）：
+    # LiteLLM 的冷却按 deployment 独立计算，而这里每个模型各自只有一个
+    # deployment。只探测模型 A 时，模型 B 冷却完全看不见 —— 守护报 ok，
+    # 而客户端正在全挂。这正是 14:05-14:33 那批报错的成因：
+    # 探测用的 1.Qwen3.5-27B 一切正常，出问题的却是 deepseek-v41-flash。
     [ -f "$MODELS_FILE" ] || return 1
     sed -n 's/^[[:space:]]*-[[:space:]]*\([^[:space:]].*\)$/\1/p' "$MODELS_FILE" \
-        | head -n 1 \
         | sed 's/[[:space:]]*$//' \
         | tr -d "\"'"
 }
@@ -216,6 +221,7 @@ probe_upstream() {
     #   ok      正常
     #   dead    连不上/超时 —— 代理进程挂了或网络不通（拿不到状态码）
     #   session 401/403/502/503，或「500 + 响应体是登录页 HTML」
+    #   cooldown 429 —— LiteLLM 路由器把该模型打入冷却，该模型全线不可用
     #   config  400 —— 多半是探测用的模型名有问题，重启无用
     #   unknown 其它
     #
@@ -226,7 +232,13 @@ probe_upstream() {
     # （上游偶发内部错误很常见，会陷入重启风暴）。
     # 判据：响应体含 <!DOCTYPE html（登录页必然是 HTML，JSON 错误不会是）。
     #
-    # dead / session 都会触发重启（代理进程本身可能是坏的），
+    # 【为什么用流式探测】（实测 2026-09-19，隔离实验）：上游返回登录页 HTML 时，
+    #   非流式 -> 500（上面的判据能认出来）
+    #   流式   -> 429 "No deployments available for selected model" + cooldown_list=[...]
+    # 两条路径的失败表现【不同】。Claude Code 全程走流式，所以只探非流式会
+    # 在客户端已经全挂时仍然报 ok。这里改成流式，让探测与真实客户端同路。
+    #
+    # dead / session / cooldown 都会触发重启（代理进程本身可能是坏的），
     # 但【只有 session 会重新登录换凭据】—— 见守护循环里的说明。
     #
     # 比 run.ps1 简单的地方：curl 的 -o 直接拿到【原始】响应体，
@@ -235,17 +247,18 @@ probe_upstream() {
     [ -n "$_model" ] || { printf 'config'; return; }
 
     # --noproxy '*'：探测目标全是本机，绝不能被系统代理接管。
-    _code=$(curl -s --noproxy '*' --max-time "$PROBE_TIMEOUT" \
+    _code=$(curl -sN --noproxy '*' --max-time "$PROBE_TIMEOUT" \
                  -o "$PROBE_BODY" -w '%{http_code}' \
                  -X POST "http://127.0.0.1:$PORT/v1/chat/completions" \
                  -H 'Content-Type: application/json' \
-                 -d "{\"model\":\"$_model\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
+                 -d "{\"model\":\"$_model\",\"max_tokens\":1,\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" \
                  2>/dev/null) || _code=000
 
     case "$_code" in
         200)             printf 'ok' ;;
         400)             printf 'config' ;;
         401|403|502|503) printf 'session' ;;
+        429)             printf 'cooldown' ;;
         500)
             if grep -q '<!DOCTYPE html' "$PROBE_BODY" 2>/dev/null; then
                 printf 'session'
@@ -256,6 +269,66 @@ probe_upstream() {
         000)             printf 'dead' ;;
         *)               printf 'unknown' ;;
     esac
+}
+
+
+probe_upstream_all() {
+    # 轮询 models.yaml 里的每个模型探测一次，把结果聚合【一个】状态字。
+    #
+    # 聚合规则（严重度由高到低，返回最高的那个）：
+    #   session  > dead > cooldown > config > unknown > ok
+    #
+    # 为什么这样排序：
+    #   - session 要重新登录，代价最高但最可能真修好，优先级最高。
+    #   - dead 是进程/网络级，覆盖一切局部模型问题。
+    #   - cooldown / config / unknown 都是「部分模型有问题」，
+    #     只要还有模型是好的，就不该触发重启（避免重启风暴）——
+    #     所以它们【只有在全部模型都失败时】才代表真故障，见下面的判断。
+    #   - 任何一个模型 ok，就说明上游和凭据都还活着。
+    #
+    # 关键：把所有模型的探测结果各自计数，只有「一个 ok 都没有」时才
+    # 把坏状态上报为故障。这样单个模型下线（上游常态）不会导致反复重启。
+    _saw_ok=0
+    _worst="ok"
+    _worst_rank=0
+
+    while IFS= read -r _m; do
+        [ -n "$_m" ] || continue
+        _s=$(probe_upstream "$_m")
+        [ "$_s" = "ok" ] && _saw_ok=1
+
+        # 短路：dead / session 是【进程级 / 凭据级】的，对每个模型都一样，
+        # 没必要再探测剩下的。这很重要：最坏情况（litellm 接受连接但上游挂起）
+        # 每个探测要等满 PROBE_TIMEOUT，逐个探完 6 个就是 270s，
+        # 会让守护循环远超 PROBE_SECONDS 而漂移。
+        # cooldown / config / unknown 是【单模型级】的，必须继续探完 ——
+        # 别的模型可能还是好的（那就该报 ok）。
+        if [ "$_s" = "dead" ] || [ "$_s" = "session" ]; then
+            printf '%s' "$_s"
+            return
+        fi
+
+        case "$_s" in
+            ok)       ;;
+            cooldown) _r=3 ;;
+            config)   _r=2 ;;
+            *)        _r=1 ;;
+        esac
+        if [ "$_s" != "ok" ] && [ "$_r" -gt "$_worst_rank" ]; then
+            _worst="$_s"
+            _worst_rank="$_r"
+        fi
+    done <<EOF
+$(get_probe_models)
+EOF
+
+    if [ "$_saw_ok" -eq 1 ]; then
+        # 还有模型是好的 —— 上游和凭据都没问题，不管局部模型状态。
+        printf 'ok'
+    else
+        [ "$_worst_rank" -eq 0 ] && _worst="config"   # 一个模型名都没读到
+        printf '%s' "$_worst"
+    fi
 }
 
 
@@ -493,8 +566,9 @@ guard_loop() {
 
         # 每轮重读：models.yaml 可能刚被自动同步改过（上游下线了探测模型时），
         # 固定用启动时那个值会让探测永远 400，守护误判成配置问题。
-        _model=$(get_probe_model)
-        _state=$(probe_upstream "$_model")
+        # 探测【全部】模型：冷却按 deployment 独立计算，只探一个会漏掉
+        # 其他模型的故障（见 probe_upstream_all 的说明）。
+        _state=$(probe_upstream_all)
 
         case "$_state" in
             ok)
@@ -514,6 +588,14 @@ guard_loop() {
                     BACKOFF_SECONDS=0
                     _since_refresh=0
                 fi
+                ;;
+            cooldown)
+                # 全部模型都处于 LiteLLM 冷却 —— 上游/凭据可能还有效，
+                # 但路由器已把每个 deployment 打入冷却，客户端全线不可用。
+                # 只重启进程即可让路由器状态清零，【不要】重新登录：
+                # 冷却不代表凭据失效，重登既慢又可能再次失败而触发退避。
+                warn "全部模型处于冷却（LiteLLM 路由器），重启进程以清空状态..."
+                if restart_proxy 0; then BACKOFF_SECONDS=0; fi
                 ;;
             config)
                 warn "探测请求被拒（可能是模型名问题），不重启。检查 models.yaml。"
@@ -552,8 +634,9 @@ main() {
     stamp "生成 litellm_config.yaml..."
     update_litellm_config || die "生成 litellm_config.yaml 失败"
 
-    if [ -n "$(get_probe_model)" ]; then
-        stamp "探测用模型: $(get_probe_model)"
+    if [ -n "$(get_probe_models)" ]; then
+        _n=$(get_probe_models | grep -c .)
+        stamp "探测用模型: 全部 $_n 个（每轮逐个探测，聚合判定）"
     else
         warn "models.yaml 里没读到模型名 —— 健康探测会跳过重启逻辑。"
     fi

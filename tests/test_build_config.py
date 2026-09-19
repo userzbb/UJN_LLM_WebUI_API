@@ -90,12 +90,22 @@ def test_render_config_unicode_false_when_non_ascii_model_name():
 
 
 def test_load_models_reads_flat_name_list():
-    """models.yaml 现在是扁平的名字列表，不再是 {upstream, aliases} 结构。"""
-    names = load_models(Path(__file__).resolve().parent.parent / "models.yaml")
+    """models.yaml 现在是扁平的名字列表，不再是 {upstream, aliases} 结构。
+
+    不断言具体模型名：上游会改名/下线，写死名字会让本测试在每次上游调整
+    时误报（"GLM-5.3" 就曾因上游改名为 "GLM-5.3-Flash" 而失败）。
+    这里只验证【结构】：读出来的一定是字符串列表，且与文件内容一致。
+    """
+    path = Path(__file__).resolve().parent.parent / "models.yaml"
+    names = load_models(path)
 
     assert names, "models.yaml should not be empty"
     assert all(isinstance(n, str) for n in names)
-    assert "GLM-5.3" in names
+    # 扁平列表：不应残留旧的 {upstream, aliases} 字典结构
+    assert not any(isinstance(n, dict) for n in names)
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert names == raw["models"]
 
 
 # --- read_yaml_scalar: 必须与真正的 YAML 解析一致 ---------------------------
@@ -638,17 +648,20 @@ def test_render_config_still_pure_ascii_with_drop_params():
 def test_pick_tier_models_prefers_the_fast_1m_models():
     """四档默认用实测最快且 1M 上下文的两个模型。
 
-    （deepseek-v41-flash 已于 2026-09 被上游禁用，首选改为同家族的
-    deepseek-v4-flash —— 上游 /models 实测 ctx=1048576。）
+    模型名随上游改动，已变过两次（见 build_litellm_config.py 里 TIER_* 的
+    历史注释）。这里传入的清单和断言要跟 TIER_* 保持一致 —— 否则 TIER_*
+    改名后本测试会失败，但失败原因看着像「档位逻辑坏了」，容易误判。
     """
+    from build_litellm_config import TIER_FABLE, TIER_OPUS, TIER_SONNET, TIER_HAIKU
     from build_litellm_config import pick_tier_models
 
-    tiers = pick_tier_models(["GLM-5.3", "deepseek-v4-flash", "GLM-5.3-Flash"])
+    models = [TIER_FABLE, "GLM-5.3", TIER_SONNET, "GLM-5.3-Flash"]
+    tiers = pick_tier_models(models)
 
-    assert tiers["fable"] == "deepseek-v4-flash"
-    assert tiers["opus"] == "deepseek-v4-flash"
-    assert tiers["sonnet"] == "GLM-5.3-Flash"
-    assert tiers["haiku"] == "GLM-5.3-Flash"
+    assert tiers["fable"] == TIER_FABLE
+    assert tiers["opus"] == TIER_OPUS
+    assert tiers["sonnet"] == TIER_SONNET
+    assert tiers["haiku"] == TIER_HAIKU
 
 
 def test_pick_tier_models_falls_back_when_preferred_absent():
